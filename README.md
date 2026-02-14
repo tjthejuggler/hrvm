@@ -1,224 +1,100 @@
 # Polar Flow-Sync Real-Time HRV Dashboard
 
-**Last Updated:** 2026-02-14
+## Overview
+A high-performance, multi-process Python application for real-time Heart Rate Variability (HRV) biofeedback using the Polar H10 chest strap.
 
-A Python-based, ultra-low-latency desktop application for real-time Heart Rate Variability (HRV) monitoring using the Polar H10 Heart Rate Sensor.
+## Features
+- **Real-Time HR & HRV:** Streams heart rate and RR intervals via the standard BLE Heart Rate Measurement characteristic, calculates RMSSD/SDNN in real-time.
+- **RSA Visualization:** "Snake" graph overlaying interpolated Heart Rate on a breathing pacer.
+- **Coherence Score:** Real-time metric (0-100) indicating heart rate synchronization with breathing.
+- **Resonance Frequency Assessment:** Automated protocol to find your optimal breathing rate.
+- **Auditory Biofeedback:** Real-time sonification of heart rate for eyes-closed training.
+- **Multi-Process Architecture:** Separate processes for BLE data acquisition, Signal Processing, and GUI rendering to ensure low latency.
+- **Raw ECG Tab:** ECG visualization via shared memory (when ECG streaming is enabled).
 
----
+## Installation
 
-## 🎯 Project Overview
-
-This application interfaces with the Polar H10 via Bluetooth Low Energy (BLE) to capture raw ECG data at 130Hz, processes it in real-time using the Pan-Tompkins algorithm, and visualizes HRV metrics with <150ms end-to-end latency.
-
-### Key Features
-
-- **Real-Time ECG Visualization:** Strip chart displaying 2 seconds of ECG data
-- **HRV Metrics:** RMSSD and SDNN calculated in real-time
-- **Resonance Frequency Assessment:** Guided breathing protocol to find optimal breathing rate
-- **Visual Pacer:** Customizable breathing pacer (Sine, Triangle, Square waves)
-- **Multi-Process Architecture:** Separate processes for BLE, signal processing, and GUI
-- **User Management:** SQLite-based user profiles and session tracking
-- **Configuration Presets:** Save and load processing parameters
-- **Artifact Rejection:** Median Absolute Deviation (MAD) filtering
-- **Auto-Reconnect:** Robust BLE connection management
-- **Mock Mode:** Simulate device data for testing without hardware
-
----
-
-## 🏗️ Architecture
-
-The system uses a **three-process architecture** for optimal performance:
-
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Process 1     │────▶│   Process 2     │────▶│   Process 3     │
-│  BLE Ingestion  │     │Signal Processing│     │  GUI/Database   │
-│   (Asyncio)     │     │  (Numba/NumPy)  │     │  (Dear PyGui)   │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-        ▲                        ▲                        │
-        │                        │                        │
-        └────────────────────────┴────────────────────────┘
-                    Control Pipes (Bidirectional)
-```
-
-**See [`plans/system_architecture.md`](plans/system_architecture.md) for complete design documentation.**
-
----
-
-## 📋 Requirements
-
-### Hardware
-- **Polar H10 Heart Rate Sensor** with chest strap
-- Bluetooth 4.0+ adapter
-- Multi-core CPU (recommended: 4+ cores)
-- 200 MB RAM minimum
-
-### Software
+### Prerequisites
 - Python 3.10+
-- Linux, macOS, or Windows
-- Bluetooth drivers installed
+- Polar H10 Heart Rate Sensor
+- Bluetooth 4.0+ Adapter
 
----
+### Linux (Ubuntu/Debian) Requirements
+On Linux, you need to install the Bluetooth development headers and ensure your user has the correct permissions.
 
-## 🚀 Quick Start
+1. Install system dependencies:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install libglib2.0-dev libbluetooth-dev python3-dev portaudio19-dev
+   ```
 
-### Installation
+2. Ensure the Bluetooth service is running:
+   ```bash
+   sudo systemctl start bluetooth
+   sudo systemctl enable bluetooth
+   ```
 
-```bash
-# Clone the repository
-git clone <repository-url>
-cd hrvm
+### Setup
+1. Clone the repository.
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-# Install dependencies using pip
-pip install -r requirements.txt
-```
+## Usage
 
-### Running the Application
+### Connecting the Polar H10
+1. **Wear the device:** Put on the Polar H10 chest strap. Ensure the electrode area is moist and the strap is tight against your skin.
+2. **Run the application:**
+   ```bash
+   python src/main.py
+   ```
+3. **Connect:** Click the "Connect" button in the top bar. The app will scan for a device named "Polar H10...", resolve it by address (required for reliable Linux/BlueZ connections), and connect automatically.
+4. **Data streaming:** Once connected, the app streams HR and RR interval data via the standard BLE Heart Rate Measurement characteristic (`0x2A37`). No manual pairing is required.
 
-```bash
-# Run the application (requires Polar H10)
-python3 src/main.py
+### Controls
+- **Connect/Disconnect:** Connects to the Polar H10 and begins data streaming.
+- **Pacer Settings:** Adjust the target breathing rate (BPM).
+- **Audio Feedback:** Toggle real-time heart rate sonification.
+- **Resonance Assessment:** Click "Start Assessment" to begin the automated protocol (approx. 15 mins). Follow the on-screen pacer instructions.
 
-# Run in Mock Mode (no device required, for testing)
-python3 src/main.py --mock
+## Architecture
+- **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Uses `BleakScanner.find_device_by_address()` for reliable Linux connections and streams HR data via the standard BLE HR Measurement characteristic.
+- **`src/processing/`**: Signal processing (filtering, interpolation, FFT) using `numpy` and `scipy`. Handles both `HRBatch` (direct HR/RR from device) and `ECGBatch` (raw ECG) data.
+- **`src/gui/`**: User Interface using `Dear PyGui`.
+- **`src/database/`**: SQLite storage for session data.
+- **`src/utils/ipc.py`**: IPC data classes (`HRBatch`, `ECGBatch`, `ProcessedData`, `BLECommand`).
 
-# Run in Mock Mode with auto-connect (useful for headless/testing)
-python3 -u src/main.py --mock --auto-connect
-```
+## Troubleshooting
 
-**Note:** Use the `-u` flag for unbuffered output when running in headless environments or when you need real-time log output.
+### Bluetooth Connection Issues (Linux)
+If the application fails to find the device or connects and immediately disconnects:
 
-### First-Time Setup
+1. **Check Bluetooth Status:**
+   ```bash
+   systemctl status bluetooth
+   ```
+2. **Unblock Bluetooth:**
+   ```bash
+   rfkill list
+   sudo rfkill unblock bluetooth
+   ```
+3. **Reset Bluetooth Adapter:**
+   ```bash
+   sudo hciconfig hci0 down
+   sudo hciconfig hci0 up
+   ```
+4. **Permissions:** Ensure your user is in the `bluetooth` group (if applicable on your distro) or try running with `sudo` temporarily to rule out permission issues (though not recommended for daily use).
 
-1. **Power on your Polar H10** and ensure it's in pairing mode (wear it!).
-2. **Launch the application**.
-3. **Create a user profile** in the User Management window (click "New User").
-4. **Select the user** from the dropdown.
-5. **Click "Connect"** to scan for and connect to your Polar H10.
-6. **Start a session** to begin recording HRV data.
+## Technical Details
+- **BLE Connection:** Uses `BleakScanner.find_device_by_address()` to obtain a `BLEDevice` object, then passes it to `BleakClient` — this is the key pattern for reliable connections on Linux/BlueZ.
+- **HR Parsing:** Parses the standard BLE Heart Rate Measurement characteristic (flags, HR value, RR intervals in 1/1024s units).
+- **Interpolation:** Cubic Spline / Pchip interpolation for smooth HR visualization.
+- **Coherence:** Power Spectral Density (PSD) analysis using Welch's method.
+- **Audio:** Real-time sine wave synthesis with smooth frequency transitions.
 
----
+## License
+MIT License
 
-## 📊 Performance Targets
-
-| Metric | Target | Status |
-|--------|--------|--------|
-| End-to-End Latency | <150ms | ✅ Achieved |
-| GUI Frame Rate | 60 FPS | ✅ Achieved |
-| Memory Usage | <200 MB | ✅ Achieved |
-| CPU Usage (per core) | <50% | ✅ Achieved |
-| BLE Reconnect Time | <5s | ✅ Achieved |
-
----
-
-## 🗂️ Project Structure
-
-```
-hrvm/
-├── src/
-│   ├── main.py                    # Entry point
-│   ├── ble/                       # BLE ingestion (Process 1)
-│   │   ├── ble_manager.py
-│   │   └── ring_buffer.py
-│   ├── processing/                # Signal processing (Process 2)
-│   │   ├── signal_processor.py
-│   │   └── math_utils.py
-│   ├── gui/                       # GUI/rendering (Process 3)
-│   │   └── ui_manager.py
-│   ├── database/                  # Data persistence
-│   │   └── db_manager.py
-│   └── utils/                     # Shared utilities
-│       └── ipc.py
-├── tests/                         # Unit and integration tests
-├── plans/                         # Architecture documentation
-├── requirements.txt               # Dependencies
-└── README.md                      # This file
-```
-
----
-
-## 🔧 Configuration & Usage
-
-### Biofeedback Controls
-- **Pacer Settings:** Adjust the breathing pacer rate (BPM) and waveform shape (Sine, Triangle, Square) in the left panel.
-- **Resonance Assessment:** Click "Start Assessment" to begin a guided protocol that steps through breathing rates (6.5 -> 4.5 BPM) to identify your resonance frequency.
-
-### Signal Processing Settings
-You can adjust processing parameters in real-time via the GUI "Settings" panel:
-
-- **Window Size:** Duration of data used for HRV calculation (default: 60s)
-- **Artifact Threshold:** Sensitivity for rejecting noise (default: 3.0 MAD)
-- **Filter Cutoffs:** Bandpass filter range (default: 5.0 - 15.0 Hz)
-
-You can save these settings as **Presets** for different users or scenarios.
-
----
-
-## 📚 Documentation
-
-- **[System Architecture](plans/system_architecture.md)** - Complete design document
-
----
-
-## 🐛 Troubleshooting
-
-### Mock Mode Shows No Data Flow
-
-**Issue:** Running `python3 src/main.py --mock` results in a static GUI with no data updates.
-
-**Root Cause:** The GUI requires manual interaction (clicking "Connect" button) to start data flow, which isn't possible in headless environments.
-
-**Solution:** Use the `--auto-connect` flag to automatically initiate the connection:
-
-```bash
-python3 -u src/main.py --mock --auto-connect
-```
-
-**Verification:** You should see log messages indicating:
-- `[DEBUG] Auto-connect enabled, sending connect command...`
-- `[MOCK] Starting mock data generation...`
-- `[DEBUG] First ProcessedData received! HR=X.X`
-- `[DEBUG] First ECG plot update with non-zero data`
-
-### GUI Not Displaying (Headless Environment)
-
-**Issue:** DearPyGUI requires a display server (X11/Wayland) to render the GUI window.
-
-**Solution:** For headless testing, the data pipeline still works (as verified by logs), but the visual GUI won't display. Consider:
-- Using X11 forwarding: `ssh -X user@host`
-- Running on a machine with a display
-- Using VNC/remote desktop for GUI access
-
-### Output Buffering Issues
-
-**Issue:** Log messages appear delayed or not at all.
-
-**Solution:** Use Python's unbuffered output mode with the `-u` flag:
-
-```bash
-python3 -u src/main.py --mock --auto-connect
-```
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-pytest
-```
-
----
-
-## 📝 License
-
-This project is licensed under the MIT License.
-
----
-
-## 🙏 Acknowledgments
-
-- **Polar Electro** for the H10 sensor and PMD protocol documentation
-- **Pan & Tompkins** for the QRS detection algorithm
-- **Dear PyGui** community for the excellent GUI framework
-- **Bleak** developers for cross-platform BLE support
+## Last Updated
+2026-02-14 18:48 CET

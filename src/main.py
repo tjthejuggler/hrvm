@@ -9,7 +9,7 @@ from multiprocessing.connection import Connection
 from src.ble.ble_manager import ble_ingestion_main
 from src.processing.signal_processor import signal_processing_main
 from src.gui.ui_manager import UIManager
-from src.utils.ipc import ECGBatch, BLECommand, ProcessedData
+from src.utils.ipc import BLECommand, ProcessedData
 
 # Configure logging
 logging.basicConfig(
