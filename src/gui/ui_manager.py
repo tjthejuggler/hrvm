@@ -19,7 +19,8 @@ from src.utils.ipc import (
 from src.gui.audio_feedback import AudioFeedback
 from src.gui.charts import (
     BiofeedbackChart, HeartbeatChart, TachogramChart,
-    PoincareChart, MetricsChart, ACCChart
+    PoincareChart, RMSSDHistoryChart, SDNNHistoryChart,
+    CoherenceHistoryChart, ACCChart
 )
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
@@ -95,7 +96,9 @@ class UIManager:
         self.heartbeat_chart = HeartbeatChart()
         self.tachogram_chart = TachogramChart()
         self.poincare_chart = PoincareChart()
-        self.metrics_chart = MetricsChart()
+        self.rmssd_chart = RMSSDHistoryChart()
+        self.sdnn_chart = SDNNHistoryChart()
+        self.coherence_chart = CoherenceHistoryChart()
         self.acc_chart = ACCChart()
 
         # UI Element Tags
@@ -132,7 +135,9 @@ class UIManager:
                 self.acc_chart.build("charts_area")
                 self.tachogram_chart.build("charts_area")
                 self.poincare_chart.build("charts_area")
-                self.metrics_chart.build("charts_area")
+                self.rmssd_chart.build("charts_area")
+                self.sdnn_chart.build("charts_area")
+                self.coherence_chart.build("charts_area")
 
         dpg.set_primary_window(self.window_tag, True)
 
@@ -332,9 +337,12 @@ class UIManager:
         dpg.set_value("coherence_display", f"{self.current_coherence:.1f}")
 
         # Metrics history
-        self.metrics_chart.add_data(current_time, self.current_rmssd,
-                                    self.current_coherence)
-        self.metrics_chart.update_plot()
+        self.rmssd_chart.add_data(current_time, self.current_rmssd)
+        self.rmssd_chart.update_plot()
+        self.sdnn_chart.add_data(current_time, data.hrv_sdnn)
+        self.sdnn_chart.update_plot()
+        self.coherence_chart.add_data(current_time, self.current_coherence)
+        self.coherence_chart.update_plot()
 
         # RR intervals -> heartbeat chart, tachogram, poincaré
         if data.rr_intervals:
@@ -382,9 +390,12 @@ class UIManager:
             dpg.set_value("coherence_display", f"{self.current_coherence:.1f}")
 
         # Metrics history
-        self.metrics_chart.add_data(current_time, self.current_rmssd,
-                                    self.current_coherence)
-        self.metrics_chart.update_plot()
+        self.rmssd_chart.add_data(current_time, self.current_rmssd)
+        self.rmssd_chart.update_plot()
+        self.sdnn_chart.add_data(current_time, 0.0)  # SDNN not in legacy payload
+        self.sdnn_chart.update_plot()
+        self.coherence_chart.add_data(current_time, self.current_coherence)
+        self.coherence_chart.update_plot()
 
         if 'rr_intervals' in payload and payload['rr_intervals']:
             rr_data = payload['rr_intervals']

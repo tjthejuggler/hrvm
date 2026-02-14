@@ -9,7 +9,7 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 - **Accelerometer (IMU) Chart:** Real-time 3-axis accelerometer data from the Polar H10 PMD service (25 Hz default).
 - **RSA Visualization:** "Snake" graph overlaying interpolated Heart Rate on a breathing pacer.
 - **Coherence Score:** Real-time metric (0-100) indicating heart rate synchronization with breathing.
-- **Collapsible Charts:** All charts (Biofeedback, Heartbeats, Accelerometer, Tachogram, Poincaré, Metrics) are individually collapsible tree-node sections — no tabs.
+- **Collapsible Charts:** All charts (Biofeedback, Heartbeats, Accelerometer, Tachogram, Poincaré, RMSSD History, SDNN History, Coherence History) are individually collapsible tree-node sections — no tabs. Each history chart is full-width.
 - **Resonance Frequency Assessment:** Automated protocol to find your optimal breathing rate.
 - **Auditory Biofeedback:** Real-time sonification of heart rate for eyes-closed training.
 - **Multi-Process Architecture:** Separate processes for BLE data acquisition, Signal Processing, and GUI rendering to ensure low latency.
@@ -64,7 +64,7 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
 - **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC data via Polar PMD service (`fb005c81/82`).
 - **`src/processing/`**: Signal processing (filtering, interpolation, FFT) using `numpy` and `scipy`. Handles `HRBatch`, `ECGBatch`, and forwards `ACCBatch` data.
 - **`src/gui/`**: User Interface using `Dear PyGui`. Charts are modular collapsible widgets in `charts.py`.
-- **`src/gui/charts.py`**: Collapsible chart widgets: BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart, MetricsChart, ACCChart.
+- **`src/gui/charts.py`**: Collapsible chart widgets: BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart, RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart, ACCChart.
 - **`src/database/`**: SQLite storage for session data.
 - **`src/utils/ipc.py`**: IPC data classes (`HRBatch`, `ECGBatch`, `ACCBatch`, `ProcessedData`, `BLECommand`).
 
@@ -101,4 +101,4 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
-2026-02-14 20:05 CET
+2026-02-14 20:24 CET

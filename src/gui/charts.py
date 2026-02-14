@@ -157,14 +157,79 @@ class PoincareChart(CollapsibleChart):
         dpg.fit_axis_data("poincare_y_axis")
 
 
-class MetricsChart(CollapsibleChart):
-    """RMSSD and Coherence history charts."""
+class RMSSDHistoryChart(CollapsibleChart):
+    """RMSSD history chart (full-width, collapsible)."""
 
     def __init__(self):
-        super().__init__("Metrics History", "metrics", default_open=False)
+        super().__init__("RMSSD History", "rmssd_hist", default_open=False)
         self.max_history = 600
         self.time_history: deque = deque(maxlen=self.max_history)
         self.rmssd_history: deque = deque(maxlen=self.max_history)
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="RMSSD History", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="rmssd_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="RMSSD (ms)", tag="rmssd_y_axis"):
+                    dpg.add_line_series([], [], label="RMSSD", tag="rmssd_series")
+
+    def add_data(self, current_time: float, rmssd: float):
+        self.time_history.append(current_time)
+        self.rmssd_history.append(rmssd)
+
+    def update_plot(self):
+        if len(self.time_history) == 0:
+            return
+        t = list(self.time_history)
+        min_len = min(len(t), len(self.rmssd_history))
+        dpg.set_value("rmssd_series", [t[-min_len:], list(self.rmssd_history)[-min_len:]])
+        dpg.fit_axis_data("rmssd_x_axis")
+        dpg.fit_axis_data("rmssd_y_axis")
+
+
+class SDNNHistoryChart(CollapsibleChart):
+    """SDNN history chart (full-width, collapsible)."""
+
+    def __init__(self):
+        super().__init__("SDNN History", "sdnn_hist", default_open=False)
+        self.max_history = 600
+        self.time_history: deque = deque(maxlen=self.max_history)
+        self.sdnn_history: deque = deque(maxlen=self.max_history)
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="SDNN History", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="sdnn_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="SDNN (ms)", tag="sdnn_y_axis"):
+                    dpg.add_line_series([], [], label="SDNN", tag="sdnn_series")
+
+    def add_data(self, current_time: float, sdnn: float):
+        self.time_history.append(current_time)
+        self.sdnn_history.append(sdnn)
+
+    def update_plot(self):
+        if len(self.time_history) == 0:
+            return
+        t = list(self.time_history)
+        min_len = min(len(t), len(self.sdnn_history))
+        dpg.set_value("sdnn_series", [t[-min_len:], list(self.sdnn_history)[-min_len:]])
+        dpg.fit_axis_data("sdnn_x_axis")
+        dpg.fit_axis_data("sdnn_y_axis")
+
+
+class CoherenceHistoryChart(CollapsibleChart):
+    """Coherence score history chart (full-width, collapsible)."""
+
+    def __init__(self):
+        super().__init__("Coherence History", "coherence_hist", default_open=False)
+        self.max_history = 600
+        self.time_history: deque = deque(maxlen=self.max_history)
         self.coherence_history: deque = deque(maxlen=self.max_history)
 
     def build(self, parent):
@@ -172,32 +237,19 @@ class MetricsChart(CollapsibleChart):
             label=self.label, parent=parent, tag=self.node_tag,
             default_open=self.default_open
         ):
-            with dpg.group(horizontal=True):
-                with dpg.plot(label="RMSSD History", height=200, width=500):
-                    dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="rmssd_x_axis")
-                    with dpg.plot_axis(dpg.mvYAxis, label="RMSSD (ms)", tag="rmssd_y_axis"):
-                        dpg.add_line_series([], [], label="RMSSD", tag="rmssd_series")
+            with dpg.plot(label="Coherence History", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="coherence_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="Score", tag="coherence_y_axis"):
+                    dpg.add_line_series([], [], label="Coherence", tag="coherence_series")
 
-                with dpg.plot(label="Coherence History", height=200, width=500):
-                    dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="coherence_x_axis")
-                    with dpg.plot_axis(dpg.mvYAxis, label="Score", tag="coherence_y_axis"):
-                        dpg.add_line_series([], [], label="Coherence", tag="coherence_series")
-
-    def add_data(self, current_time: float, rmssd: float, coherence: float):
+    def add_data(self, current_time: float, coherence: float):
         self.time_history.append(current_time)
-        self.rmssd_history.append(rmssd)
         self.coherence_history.append(coherence)
 
     def update_plot(self):
         if len(self.time_history) == 0:
             return
         t = list(self.time_history)
-        # RMSSD
-        min_len = min(len(t), len(self.rmssd_history))
-        dpg.set_value("rmssd_series", [t[-min_len:], list(self.rmssd_history)[-min_len:]])
-        dpg.fit_axis_data("rmssd_x_axis")
-        dpg.fit_axis_data("rmssd_y_axis")
-        # Coherence
         min_len = min(len(t), len(self.coherence_history))
         dpg.set_value("coherence_series", [t[-min_len:], list(self.coherence_history)[-min_len:]])
         dpg.fit_axis_data("coherence_x_axis")
