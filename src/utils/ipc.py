@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 
 @dataclass
@@ -30,6 +30,17 @@ class HRBatch:
     heart_rate_bpm: int            # Instantaneous heart rate
     rr_intervals_ms: List[float]   # RR intervals in milliseconds (may be empty)
     sequence_number: int           # For detecting drops
+
+@dataclass
+class ACCBatch:
+    """
+    Accelerometer data from Polar H10 PMD (Polar Measurement Data) service.
+    Provides 3-axis acceleration samples at 25/50/100/200 Hz.
+    """
+    timestamp_unix: float                      # Unix epoch (seconds)
+    samples: List[Tuple[int, int, int]]        # List of (x, y, z) in milliG
+    sample_rate: int = 25                      # Hz (default 25 for low power)
+    sequence_number: int = 0
 
 @dataclass
 class BLECommand:

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import struct
 import time
 import random
 from typing import Optional, List, Tuple
@@ -9,7 +10,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 
 from src.ble.ring_buffer import RingBuffer
-from src.utils.ipc import HRBatch, BLECommand
+from src.utils.ipc import HRBatch, ACCBatch, BLECommand
 
 # Configure logging
 logger = logging.getLogger("ble_process")
@@ -21,6 +22,14 @@ logger.addHandler(handler)
 
 # Standard BLE Heart Rate Measurement UUID
 HR_MEASUREMENT_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
+
+# Polar Measurement Data (PMD) Service UUIDs
+PMD_CONTROL_UUID = "fb005c81-02e7-f387-1cad-8acd2d8df0c8"
+PMD_DATA_UUID = "fb005c82-02e7-f387-1cad-8acd2d8df0c8"
+
+# PMD measurement types
+PMD_TYPE_ECG = 0x00
+PMD_TYPE_ACC = 0x02
 
 
 def parse_heart_rate_data(data: bytearray) -> Tuple[int, List[float]]:
@@ -57,10 +66,39 @@ def parse_heart_rate_data(data: bytearray) -> Tuple[int, List[float]]:
     return hr, rr_intervals
 
 
+def parse_acc_data(data: bytearray) -> List[Tuple[int, int, int]]:
+    """Parse Polar PMD ACC notification data.
+
+    The PMD ACC frame format:
+    - Byte 0: Measurement type (0x02 = ACC)
+    - Byte 1-8: Timestamp (uint64, little-endian, nanoseconds)
+    - Byte 9: Frame type
+    - Remaining: ACC samples as signed 16-bit little-endian (x, y, z triplets)
+
+    Returns: list of (x_mg, y_mg, z_mg) tuples
+    """
+    if len(data) < 10:
+        return []
+
+    # Skip header: type(1) + timestamp(8) + frame_type(1) = 10 bytes
+    offset = 10
+    samples = []
+
+    while offset + 6 <= len(data):
+        x = struct.unpack_from('<h', data, offset)[0]
+        y = struct.unpack_from('<h', data, offset + 2)[0]
+        z = struct.unpack_from('<h', data, offset + 4)[0]
+        samples.append((x, y, z))
+        offset += 6
+
+    return samples
+
+
 class BleakManager:
     """
-    Manages BLE connection to Polar H10 and streams HR data.
-    Uses the standard BLE Heart Rate Measurement characteristic.
+    Manages BLE connection to Polar H10 and streams HR + ACC data.
+    Uses the standard BLE Heart Rate Measurement characteristic for HR/RR,
+    and the Polar PMD service for accelerometer data.
     Runs in dedicated process with asyncio event loop.
     """
 
@@ -72,9 +110,11 @@ class BleakManager:
         self.client: Optional[BleakClient] = None
         self.device: Optional[BLEDevice] = None
         self.sequence_number = 0
+        self.acc_sequence_number = 0
         self.is_streaming = False
         self.should_exit = False
         self.mock_mode = mock_mode
+        self.acc_streaming = False
 
     async def scan_and_connect(self, timeout: float = 10.0) -> bool:
         """Scan for Polar H10 and establish connection using the proven pattern."""
@@ -100,13 +140,11 @@ class BleakManager:
         logger.info(f"Found device: {device.name} ({device.address})")
 
         # Step 2: Use find_device_by_address to get a reliable BLEDevice object
-        # This is the KEY pattern that works on Linux/BlueZ
         logger.info(f"Resolving device by address: {device.address}...")
         resolved_device = await BleakScanner.find_device_by_address(
             device.address, timeout=timeout
         )
 
-        # Use the resolved BLEDevice object (not raw address string)
         target = resolved_device if resolved_device else device.address
         logger.info(f"Using target: {target} (type: {type(target).__name__})")
 
@@ -136,6 +174,7 @@ class BleakManager:
     def _on_disconnect(self, client: BleakClient):
         logger.warning("Disconnected from device.")
         self.is_streaming = False
+        self.acc_streaming = False
         try:
             self.control_pipe.send({"status": "disconnected"})
         except Exception:
@@ -171,6 +210,78 @@ class BleakManager:
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
+    async def enable_acc_stream(self, sample_rate: int = 25) -> None:
+        """Start ACC streaming via Polar PMD service.
+
+        The Polar H10 PMD protocol requires:
+        1. Subscribe to PMD Control Point indications (to receive responses)
+        2. Subscribe to PMD Data notifications (to receive measurement data)
+        3. Write start command to PMD Control Point
+
+        Args:
+            sample_rate: Desired sample rate in Hz (25, 50, 100, or 200).
+        """
+        if self.mock_mode:
+            logger.info("[MOCK] Starting ACC stream...")
+            self.acc_streaming = True
+            asyncio.create_task(self._generate_mock_acc_data())
+            return
+
+        if not self.client or not self.client.is_connected:
+            logger.error("Cannot enable ACC stream: Not connected.")
+            return
+
+        # Check if PMD service is available
+        pmd_control = None
+        pmd_data = None
+        for service in self.client.services:
+            for char in service.characteristics:
+                if char.uuid.lower() == PMD_CONTROL_UUID.lower():
+                    pmd_control = char
+                if char.uuid.lower() == PMD_DATA_UUID.lower():
+                    pmd_data = char
+
+        if not pmd_control or not pmd_data:
+            logger.warning("PMD service not found on device. ACC streaming unavailable.")
+            return
+
+        try:
+            # Step 1: Subscribe to PMD Control Point indications (for responses)
+            logger.info("Subscribing to PMD Control Point indications...")
+            await self.client.start_notify(PMD_CONTROL_UUID, self._pmd_control_handler)
+            await asyncio.sleep(0.5)
+
+            # Step 2: Subscribe to PMD Data notifications (for measurement data)
+            logger.info("Subscribing to PMD Data notifications...")
+            await self.client.start_notify(PMD_DATA_UUID, self._acc_notification_handler)
+            await asyncio.sleep(0.5)
+
+            # Step 3: Write start command to PMD Control Point
+            # PMD control request format:
+            # Byte 0: 0x02 (start measurement)
+            # Byte 1: measurement type (0x02 = ACC)
+            # Remaining: setting type + value pairs (little-endian uint16)
+            start_cmd = bytearray([
+                0x02,  # Start measurement
+                0x02,  # ACC type
+                0x00,  # Setting: sample rate
+                sample_rate & 0xFF, (sample_rate >> 8) & 0xFF,
+                0x01,  # Setting: resolution
+                0x10, 0x00,  # 16 bits
+                0x02,  # Setting: range
+                0x08, 0x00,  # 8G
+            ])
+
+            logger.info(f"Writing ACC start command: {start_cmd.hex()}")
+            await self.client.write_gatt_char(PMD_CONTROL_UUID, start_cmd, response=True)
+            self.acc_streaming = True
+            logger.info(f"ACC stream enabled at {sample_rate} Hz.")
+
+        except Exception as e:
+            logger.warning(f"Failed to start ACC stream: {e}")
+            import traceback
+            logger.warning(f"ACC traceback: {traceback.format_exc()}")
+
     def _hr_notification_handler(self, sender, data: bytearray) -> None:
         """Handle incoming HR Measurement notifications."""
         hr_bpm, rr_intervals = parse_heart_rate_data(data)
@@ -187,6 +298,36 @@ class BleakManager:
             self.data_pipe.send(batch)
         except Exception as e:
             logger.error(f"Failed to send HR batch to pipe: {e}")
+
+    def _pmd_control_handler(self, sender, data: bytearray) -> None:
+        """Handle PMD Control Point indications (responses to commands)."""
+        if len(data) < 3:
+            logger.debug(f"PMD Control response (short): {data.hex()}")
+            return
+        response_code = data[0]
+        op_code = data[1]
+        status = data[2]
+        status_str = "success" if status == 0 else f"error({status})"
+        logger.info(f"PMD Control response: op=0x{op_code:02x}, status={status_str}, raw={data.hex()}")
+
+    def _acc_notification_handler(self, sender, data: bytearray) -> None:
+        """Handle incoming PMD ACC data notifications."""
+        samples = parse_acc_data(data)
+        if not samples:
+            return
+
+        batch = ACCBatch(
+            timestamp_unix=time.time(),
+            samples=samples,
+            sample_rate=25,
+            sequence_number=self.acc_sequence_number
+        )
+        self.acc_sequence_number += 1
+
+        try:
+            self.data_pipe.send(batch)
+        except Exception as e:
+            logger.error(f"Failed to send ACC batch to pipe: {e}")
 
     async def _generate_mock_data(self):
         """Generate mock HR data for testing without device."""
@@ -223,6 +364,39 @@ class BleakManager:
 
         logger.info(f"[MOCK] Mock data generation stopped. Total batches: {batch_count}")
 
+    async def _generate_mock_acc_data(self):
+        """Generate mock ACC data for testing without device."""
+        logger.info("[MOCK] Starting mock ACC data generation...")
+        batch_count = 0
+
+        while self.acc_streaming and not self.should_exit:
+            # Generate 25 samples per batch (1 second at 25Hz)
+            samples = []
+            for _ in range(25):
+                x = random.randint(-100, 100)
+                y = random.randint(-100, 100)
+                z = 1000 + random.randint(-50, 50)  # ~1G on Z axis
+                samples.append((x, y, z))
+
+            batch = ACCBatch(
+                timestamp_unix=time.time(),
+                samples=samples,
+                sample_rate=25,
+                sequence_number=self.acc_sequence_number
+            )
+            self.acc_sequence_number += 1
+            batch_count += 1
+
+            try:
+                self.data_pipe.send(batch)
+            except Exception as e:
+                logger.error(f"[MOCK] Failed to send mock ACC batch: {e}")
+                break
+
+            await asyncio.sleep(1.0)
+
+        logger.info(f"[MOCK] Mock ACC data generation stopped. Total batches: {batch_count}")
+
     async def handle_control_messages(self) -> None:
         """Process commands from GUI (connect/disconnect/exit)."""
         try:
@@ -238,11 +412,15 @@ class BleakManager:
                             if self.mock_mode:
                                 await self.scan_and_connect()
                                 await self.enable_hr_stream()
+                                await asyncio.sleep(1.0)  # Let HR settle before PMD
+                                await self.enable_acc_stream()
                                 self.control_pipe.send({"status": "connected"})
                             elif not self.client or not self.client.is_connected:
                                 try:
                                     if await self.scan_and_connect():
                                         await self.enable_hr_stream()
+                                        await asyncio.sleep(1.0)  # Let HR settle before PMD
+                                        await self.enable_acc_stream()
                                         self.control_pipe.send({"status": "connected"})
                                     else:
                                         self.control_pipe.send({"status": "disconnected"})
@@ -254,11 +432,20 @@ class BleakManager:
                         elif msg.command == "disconnect":
                             if self.mock_mode:
                                 self.is_streaming = False
+                                self.acc_streaming = False
                                 logger.info("[MOCK] Disconnected")
                                 self.control_pipe.send({"status": "disconnected"})
                             elif self.client and self.client.is_connected:
                                 try:
                                     await self.client.stop_notify(HR_MEASUREMENT_UUID)
+                                except Exception:
+                                    pass
+                                try:
+                                    await self.client.stop_notify(PMD_DATA_UUID)
+                                except Exception:
+                                    pass
+                                try:
+                                    await self.client.stop_notify(PMD_CONTROL_UUID)
                                 except Exception:
                                     pass
                                 await self.client.disconnect()
@@ -291,6 +478,14 @@ class BleakManager:
         if not self.mock_mode and self.client and self.client.is_connected:
             try:
                 await self.client.stop_notify(HR_MEASUREMENT_UUID)
+            except Exception:
+                pass
+            try:
+                await self.client.stop_notify(PMD_DATA_UUID)
+            except Exception:
+                pass
+            try:
+                await self.client.stop_notify(PMD_CONTROL_UUID)
             except Exception:
                 pass
             await self.client.disconnect()

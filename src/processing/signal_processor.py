@@ -9,11 +9,11 @@ from typing import Dict, Any, Optional, Tuple, List
 from scipy.signal import butter, lfilter, lfilter_zi
 
 from src.utils.ipc import (
-    IPCMessage, ECGBatch, HRBatch, MSG_TERMINATE, MSG_DATA_UPDATE, MSG_CMD_START_STREAM,
-    MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET, MSG_CMD_START_ASSESSMENT,
-    MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT, KEY_TIMESTAMP, KEY_RAW_ECG,
-    KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE, KEY_IS_ARTIFACT,
-    KEY_PACER_BPM, KEY_ASSESSMENT_TAG, KEY_OPTIMAL_BPM,
+    IPCMessage, ECGBatch, HRBatch, ACCBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
+    MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
+    MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
+    KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
+    KEY_IS_ARTIFACT, KEY_PACER_BPM, KEY_ASSESSMENT_TAG, KEY_OPTIMAL_BPM,
     ProcessedData, ProcessingConfig, SystemCommand, CommandType
 )
 from src.processing.math_utils import (
@@ -86,11 +86,13 @@ class SignalProcessor:
         
         while self.running:
             try:
-                # Check Data Pipe (ECG or HR Batches)
+                # Check Data Pipe (ECG, HR, or ACC Batches)
                 if self.data_pipe.poll():
                     message = self.data_pipe.recv()
                     if isinstance(message, HRBatch):
                         self.process_hr_batch(message)
+                    elif isinstance(message, ACCBatch):
+                        self.forward_acc_batch(message)
                     elif isinstance(message, ECGBatch):
                         self.process_ecg_batch(message)
                     elif isinstance(message, IPCMessage):
@@ -117,6 +119,13 @@ class SignalProcessor:
                 self.running = False
             except Exception as e:
                 logger.error(f"Error in Signal Processor loop: {e}")
+
+    def forward_acc_batch(self, batch: ACCBatch):
+        """Forward ACC data directly to GUI (no processing needed)."""
+        try:
+            self.output_pipe.send(batch)
+        except Exception as e:
+            logger.error(f"Failed to forward ACC batch: {e}")
                 
     def process_hr_batch(self, batch: HRBatch):
         """Process HR data received directly from the BLE HR characteristic."""
@@ -194,7 +203,6 @@ class SignalProcessor:
         
         # Update Shared Memory for Visualization
         if self.shm_buffer is not None:
-            # We want the last 260 samples
             current_signal = np.array(self.filtered_buffer)
             display_data = current_signal[-260:]
             if len(display_data) < 260:
@@ -224,7 +232,6 @@ class SignalProcessor:
                     if 300 < rr_ms < 2000:
                         self.rr_intervals.append(rr_ms)
                         new_rr_intervals.append(rr_ms)
-                        # Add to main buffer for RSA logic
                         self.rr_buffer.append((time.time(), rr_ms))
                 self.last_peak_idx = abs_p
         
@@ -288,22 +295,18 @@ class SignalProcessor:
         if len(nn_intervals) > 1:
             rmssd, _ = calculate_metrics(np.array(nn_intervals))
 
-        # Prepare output payload
-        # We send ProcessedData for compatibility with new UI features
-        # But also IPCMessage for backward compatibility if needed
-        
         output_payload = ProcessedData(
             timestamp=timestamp,
-            ecg_window=np.array([]), # Handled via SHM
+            ecg_window=np.array([]),
             rr_intervals=[rr_ms] if rr_ms else [],
             heart_rate=latest_interpolated,
             hrv_rmssd=rmssd,
-            hrv_sdnn=0.0, # TODO
-            quality_score=1.0, # TODO
+            hrv_sdnn=0.0,
+            quality_score=1.0,
             coherence_score=coherence_score,
             is_assessing=self.assessment_active,
             assessment_stage=self.current_assessment_tag if self.current_assessment_tag else "",
-            assessment_progress=0.0 # TODO
+            assessment_progress=0.0
         )
         
         try:
@@ -322,7 +325,6 @@ class SignalProcessor:
         self.finalize_assessment()
 
     def finalize_assessment(self):
-        # Calculate results
         best_tag = None
         max_avg_amplitude = -1.0
         
@@ -335,17 +337,15 @@ class SignalProcessor:
                 max_avg_amplitude = avg_amp
                 best_tag = tag
         
-        optimal_bpm = 6.0 # Default
+        optimal_bpm = 6.0
         if best_tag:
             try:
-                # Parse tag "6.5_BPM" -> 6.5
                 optimal_bpm = float(best_tag.split('_')[0])
             except ValueError:
                 logger.error(f"Could not parse BPM from tag: {best_tag}")
         
         logger.info(f"Optimal BPM determined: {optimal_bpm}")
         
-        # Send result
         try:
             self.output_pipe.send(IPCMessage(MSG_ASSESSMENT_RESULT, {
                 KEY_OPTIMAL_BPM: optimal_bpm
@@ -353,7 +353,6 @@ class SignalProcessor:
         except Exception as e:
             logger.error(f"Failed to send assessment result: {e}")
         
-        # Reset data
         self.assessment_data = {}
         self.current_assessment_tag = None
 
