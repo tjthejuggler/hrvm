@@ -83,6 +83,7 @@ class SignalProcessor:
     def run(self):
         logger.info("Signal Processor started.")
         self.running = True
+        self._data_counts = {"HR": 0, "ACC": 0, "ECG": 0, "IPC": 0}
         
         while self.running:
             try:
@@ -90,12 +91,22 @@ class SignalProcessor:
                 if self.data_pipe.poll():
                     message = self.data_pipe.recv()
                     if isinstance(message, HRBatch):
+                        self._data_counts["HR"] += 1
+                        if self._data_counts["HR"] <= 3:
+                            logger.info(f"[DATA] Received HRBatch #{self._data_counts['HR']}")
                         self.process_hr_batch(message)
                     elif isinstance(message, ACCBatch):
+                        self._data_counts["ACC"] += 1
+                        if self._data_counts["ACC"] <= 3:
+                            logger.info(f"[DATA] Received ACCBatch #{self._data_counts['ACC']} with {len(message.samples)} samples")
                         self.forward_acc_batch(message)
                     elif isinstance(message, ECGBatch):
+                        self._data_counts["ECG"] += 1
+                        if self._data_counts["ECG"] <= 3:
+                            logger.info(f"[DATA] Received ECGBatch #{self._data_counts['ECG']} with {len(message.samples)} samples")
                         self.process_ecg_batch(message)
                     elif isinstance(message, IPCMessage):
+                        self._data_counts["IPC"] += 1
                         self.process_message(message)
 
                 # Check Control Pipe (Commands)
@@ -193,6 +204,12 @@ class SignalProcessor:
             logger.error(f"Failed to send HR data update: {e}")
 
     def process_ecg_batch(self, batch: ECGBatch):
+        # Forward raw ECG batch to GUI for chart display
+        try:
+            self.output_pipe.send(batch)
+        except Exception as e:
+            logger.error(f"Failed to forward ECG batch to GUI: {e}")
+
         # 1. Update raw buffer
         new_samples = batch.samples
         self.raw_buffer.extend(new_samples)

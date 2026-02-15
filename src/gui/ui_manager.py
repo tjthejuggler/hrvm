@@ -9,7 +9,7 @@ from multiprocessing.connection import Connection
 from multiprocessing import shared_memory
 
 from src.utils.ipc import (
-    IPCMessage, BLECommand, ACCBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
+    IPCMessage, BLECommand, ACCBatch, ECGBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
@@ -20,7 +20,7 @@ from src.gui.audio_feedback import AudioFeedback
 from src.gui.charts import (
     BiofeedbackChart, HeartbeatChart, TachogramChart,
     PoincareChart, RMSSDHistoryChart, SDNNHistoryChart,
-    CoherenceHistoryChart, ACCChart
+    CoherenceHistoryChart, ACCChart, ECGChart
 )
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
@@ -100,6 +100,7 @@ class UIManager:
         self.sdnn_chart = SDNNHistoryChart()
         self.coherence_chart = CoherenceHistoryChart()
         self.acc_chart = ACCChart()
+        self.ecg_chart = ECGChart()
 
         # UI Element Tags
         self.window_tag = "Primary Window"
@@ -133,6 +134,7 @@ class UIManager:
                 self.biofeedback_chart.build("charts_area")
                 self.heartbeat_chart.build("charts_area")
                 self.acc_chart.build("charts_area")
+                self.ecg_chart.build("charts_area")
                 self.tachogram_chart.build("charts_area")
                 self.poincare_chart.build("charts_area")
                 self.rmssd_chart.build("charts_area")
@@ -288,6 +290,8 @@ class UIManager:
                     msg = self.data_pipe.recv()
                     if isinstance(msg, ACCBatch):
                         self.handle_acc_data(msg)
+                    elif isinstance(msg, ECGBatch):
+                        self.handle_ecg_data(msg)
                     elif isinstance(msg, IPCMessage):
                         if msg.type == MSG_DATA_UPDATE:
                             self.handle_data_update(msg.payload)
@@ -414,6 +418,14 @@ class UIManager:
         self.acc_chart.add_samples(batch.timestamp_unix, batch.samples,
                                    batch.sample_rate, self.start_time)
         self.acc_chart.update_plot(current_time)
+
+    def handle_ecg_data(self, batch: ECGBatch):
+        """Handle ECG data from BLE PMD service."""
+        current_time = time.time() - self.start_time
+        samples = batch.samples.tolist() if hasattr(batch.samples, 'tolist') else list(batch.samples)
+        self.ecg_chart.add_samples(batch.timestamp_unix, samples,
+                                   batch.sample_rate, self.start_time)
+        self.ecg_chart.update_plot(current_time)
 
     # --- Pacer ---
 
