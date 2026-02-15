@@ -150,18 +150,22 @@ class SignalProcessor:
                 self.rr_intervals.append(rr_ms)
                 self.rr_buffer.append((timestamp, rr_ms))
 
-        # Calculate metrics from accumulated RR intervals
-        nn_intervals = [x[1] for x in self.rr_buffer]
-        timestamps = [x[0] for x in self.rr_buffer]
-
-        # Interpolation for RSA visualization
+        # --- FIX 1: Filter buffer for Rolling Window (Last 60 Seconds) ---
         current_time = time.time()
-        x_new, y_new = interpolate_hr_stream(timestamps, nn_intervals, current_time)
+        window_start = current_time - 60.0
+        
+        # Extract only beats from the last 60 seconds for calculation
+        recent_nn = [rr for t, rr in self.rr_buffer if t >= window_start]
+        recent_timestamps = [t for t, rr in self.rr_buffer if t >= window_start]
+        # -----------------------------------------------------------------
 
-        # Use device-reported HR directly (more accurate than interpolation for display)
+        # Interpolation for RSA visualization (uses recent history)
+        x_new, y_new = interpolate_hr_stream(recent_timestamps, recent_nn, current_time)
+
+        # Use device-reported HR directly
         display_hr = float(hr_bpm) if hr_bpm > 0 else (y_new[-1] if len(y_new) > 0 else 0.0)
 
-        # Coherence calculation (throttled to 1Hz)
+        # Coherence calculation
         coherence_score = 0.0
         if current_time - self.last_coherence_calc_time > 1.0:
             if len(y_new) > 0:
@@ -177,12 +181,14 @@ class SignalProcessor:
                     self.assessment_data[self.current_assessment_tag] = []
                 self.assessment_data[self.current_assessment_tag].append(amplitude)
 
-        # Calculate RMSSD from accumulated NN intervals
+        # --- FIX 2: Calculate Metrics on Rolling Window ---
         rmssd = 0.0
         sdnn = 0.0
-        if len(nn_intervals) > 1:
-            rmssd, sdnn_val = calculate_metrics(np.array(nn_intervals))
+        if len(recent_nn) > 1:
+            # Calculate on 'recent_nn' (60s window) instead of all 'nn_intervals'
+            rmssd, sdnn_val = calculate_metrics(np.array(recent_nn))
             sdnn = sdnn_val
+        # --------------------------------------------------
 
         output = ProcessedData(
             timestamp=timestamp,
@@ -226,37 +232,13 @@ class SignalProcessor:
                 display_data = np.pad(display_data, (260 - len(display_data), 0), 'constant')
             self.shm_buffer[:] = display_data.astype(np.int32)
 
-        if len(self.filtered_buffer) < self.buffer_size:
-            return
-
-        # 3. Peak Detection & RR Extraction
-        current_signal = np.array(self.filtered_buffer)
-        energy = pan_tompkins_energy(current_signal, self.sample_rate)
-        threshold = np.mean(energy) * 0.6 
-        min_dist = int(0.25 * self.sample_rate)
-        peaks = find_peaks(energy, threshold, min_dist)
+        # --- FIX 3: REMOVED Peak Detection Logic ---
+        # We are receiving accurate RR intervals from the Polar H10 hardware
+        # via process_hr_batch. Calculating them again here creates duplicate
+        # data and interferes with the metrics.
         
-        # Map peaks to absolute indices and extract RR
-        buffer_start_idx = self.total_samples_processed - len(self.filtered_buffer) + len(new_samples)
-        new_rr_intervals = []
-        
-        for p in peaks:
-            abs_p = self.total_samples_processed - len(current_signal) + p
-            if abs_p > self.last_peak_idx:
-                if self.last_peak_idx != -1:
-                    rr_samples = abs_p - self.last_peak_idx
-                    rr_ms = (rr_samples / self.sample_rate) * 1000.0
-                    if 300 < rr_ms < 2000:
-                        self.rr_intervals.append(rr_ms)
-                        new_rr_intervals.append(rr_ms)
-                        self.rr_buffer.append((time.time(), rr_ms))
-                self.last_peak_idx = abs_p
-        
+        # self.total_samples_processed is still useful if you re-enable this later
         self.total_samples_processed += len(new_samples)
-        
-        # 4. Calculate Metrics & Send Update
-        if new_rr_intervals:
-            self.handle_data_update({'rr_ms': new_rr_intervals[-1], 'timestamp': batch.timestamp_unix})
 
     def process_message(self, message: IPCMessage):
         if message.type == MSG_TERMINATE:
