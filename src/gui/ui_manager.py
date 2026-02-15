@@ -19,10 +19,11 @@ from src.utils.ipc import (
 )
 from src.gui.audio_feedback import AudioFeedback
 from src.gui.charts import (
-    BiofeedbackChart, HeartbeatChart, TachogramChart,
-    PoincareChart, RMSSDHistoryChart, SDNNHistoryChart,
-    CoherenceHistoryChart, ACCChart, ECGChart
+    BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart,
+    RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart,
+    ACCChart, ECGChart
 )
+from src.gui.led_ball import LEDBallController
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
 
@@ -42,6 +43,10 @@ class UIManager:
         # Audio Feedback
         self.audio_feedback = AudioFeedback()
         self.audio_enabled = False
+
+        # LED Ball Control
+        self.led_ball = LEDBallController()
+        self.led_ball_enabled = False
 
         # Shared memory for ECG display (legacy, kept for compatibility)
         self.shm: Optional[shared_memory.SharedMemory] = None
@@ -218,6 +223,16 @@ class UIManager:
                 dpg.add_button(label="Load", callback=self.create_load_preset_window,
                                width=70)
 
+            dpg.add_spacer(height=20)
+            dpg.add_separator()
+            dpg.add_text("LED Ball")
+            dpg.add_checkbox(label="Enable LED Ball", tag="led_ball_checkbox",
+                             default_value=False, callback=self._toggle_led_ball)
+            dpg.add_input_text(label="IP", tag="led_ball_ip_input",
+                               default_value=self.led_ball.ip, width=150,
+                               callback=self._update_led_ball_ip,
+                               on_enter=True)
+
     def _build_center_panel(self):
         with dpg.child_window(width=-300, height=-1, border=False):
             with dpg.group(horizontal=True):
@@ -311,6 +326,8 @@ class UIManager:
                             self.handle_data_update(msg.payload)
                         elif msg.type == MSG_HEARTBEAT_BLINK:
                             self._blink_time = time.time()
+                            if self.led_ball_enabled:
+                                self.led_ball.blink(self._blink_duration)
                         elif msg.type == MSG_ASSESSMENT_RESULT:
                             self.handle_assessment_result(msg.payload)
                     elif isinstance(msg, ProcessedData):
@@ -449,7 +466,8 @@ class UIManager:
         """Update the heartbeat indicator circle color each frame.
 
         On blink: fill flashes red, then fades linearly back to black
-        over self._blink_duration seconds.
+        over self._blink_duration seconds.  The external LED ball is
+        driven via blink() in process_incoming_data (once per beat).
         """
         elapsed = time.time() - self._blink_time
         if elapsed < self._blink_duration:
@@ -495,6 +513,16 @@ class UIManager:
             self.audio_feedback.start()
         else:
             self.audio_feedback.stop()
+
+    def _toggle_led_ball(self, sender, app_data):
+        self.led_ball_enabled = app_data
+        logger.info(f"LED ball {'enabled' if app_data else 'disabled'}")
+
+    def _update_led_ball_ip(self, sender, app_data):
+        ip = app_data.strip()
+        if ip:
+            self.led_ball.set_ip(ip)
+            logger.info(f"LED ball IP set to {ip}")
 
     def update_pacer_rate(self, sender, app_data):
         self.pacer_rate = app_data

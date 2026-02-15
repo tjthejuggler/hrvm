@@ -6,6 +6,7 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 ## Features
 - **Real-Time HR & HRV:** Streams heart rate and RR intervals via the standard BLE Heart Rate Measurement characteristic, calculates RMSSD/SDNN in real-time.
 - **Heartbeat Blink Indicator:** A small circle next to the HR display that flashes red on each detected heartbeat (via ECG R-wave detection) and fades back to black within 150ms. Uses a fast visual-only path from the ECG stream (~100-150ms latency) while keeping the standard HR service for accurate metrics.
+- **External LED Ball Support:** Optionally drives an external LED ball (UDP, port 41412) in sync with the heartbeat blink. Uses the ball's native protocol (8-byte header + 4-byte `0x0a R G B` color command). Enable/disable and set the IP address from the "LED Ball" section in the left settings panel. Default IP: `10.122.252.133`.
 - **Heartbeat Chart:** Individual heartbeats displayed as a stem plot with RR intervals (ms) and timing for each beat.
 - **Accelerometer (IMU) Chart:** Real-time 3-axis accelerometer data from the Polar H10 PMD service (25 Hz default).
 - **ECG Waveform Chart:** Real-time ECG waveform from the Polar H10 PMD service (130 Hz, 14-bit resolution). Displays a 5-second scrolling window of microvolt samples.
@@ -60,12 +61,14 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
 - **Connect/Disconnect:** Connects to the Polar H10 and begins data streaming.
 - **Pacer Settings:** Adjust the target breathing rate (BPM).
 - **Audio Feedback:** Toggle real-time heart rate sonification.
+- **LED Ball:** Enable/disable the external LED ball and set its IP address. The ball flashes red on each heartbeat when enabled.
 - **Resonance Assessment:** Click "Start Assessment" to begin the automated protocol (approx. 15 mins). Follow the on-screen pacer instructions.
 
 ## Architecture
 - **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, and D-Bus `StartNotify` for reliable PMD streaming.
 - **`src/processing/`**: Signal processing (filtering, interpolation, FFT) using `numpy` and `scipy`. Handles `HRBatch`, `ECGBatch`, and forwards `ACCBatch` data.
 - **`src/gui/`**: User Interface using `Dear PyGui`. Charts are modular collapsible widgets in `charts.py`.
+- **`src/gui/led_ball.py`**: `LEDBallController` — drives an external LED ball over UDP using the ball's native protocol (8-byte header + `0x0a R G B` color command). Integrated with the heartbeat blink in `ui_manager.py`.
 - **`src/gui/charts.py`**: Collapsible chart widgets: BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart, RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart, ACCChart, ECGChart.
 - **`src/database/`**: SQLite storage for session data.
 - **`src/utils/ipc.py`**: IPC data classes (`HRBatch`, `ECGBatch`, `ACCBatch`, `ProcessedData`, `BLECommand`).
@@ -108,4 +111,4 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
-2026-02-15 13:31 CET
+2026-02-15 14:04 CET
