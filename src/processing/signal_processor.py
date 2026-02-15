@@ -10,6 +10,7 @@ from scipy.signal import butter, lfilter, lfilter_zi
 
 from src.utils.ipc import (
     IPCMessage, ECGBatch, HRBatch, ACCBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
+    MSG_HEARTBEAT_BLINK,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
@@ -232,12 +233,31 @@ class SignalProcessor:
                 display_data = np.pad(display_data, (260 - len(display_data), 0), 'constant')
             self.shm_buffer[:] = display_data.astype(np.int32)
 
-        # --- FIX 3: REMOVED Peak Detection Logic ---
-        # We are receiving accurate RR intervals from the Polar H10 hardware
-        # via process_hr_batch. Calculating them again here creates duplicate
-        # data and interferes with the metrics.
-        
-        # self.total_samples_processed is still useful if you re-enable this later
+        # 3. FAST BLINK DETECTION (Visual-only, does NOT touch self.rr_intervals)
+        # Metrics still come from process_hr_batch via the standard HR service.
+        # This only fires a "blink" trigger for the GUI heartbeat indicator.
+        current_signal = np.array(self.filtered_buffer)
+        if len(current_signal) >= 130:
+            analysis_window = current_signal[-130:]  # Last ~1 second at 130 Hz
+            energy = pan_tompkins_energy(analysis_window, self.sample_rate)
+            threshold = np.mean(energy) * 0.6
+            min_dist = int(0.25 * self.sample_rate)  # 250ms refractory
+
+            peaks = find_peaks(energy, threshold, min_dist)
+
+            if len(peaks) > 0:
+                last_peak_index = peaks[-1]
+                samples_in_window = len(analysis_window)
+                new_samples_count = len(new_samples)
+
+                # Only fire if the peak is in the newly-arrived samples
+                if last_peak_index >= (samples_in_window - new_samples_count):
+                    try:
+                        self.output_pipe.send(
+                            IPCMessage(MSG_HEARTBEAT_BLINK, {}))
+                    except Exception:
+                        pass
+
         self.total_samples_processed += len(new_samples)
 
     def process_message(self, message: IPCMessage):

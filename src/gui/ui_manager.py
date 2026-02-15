@@ -10,6 +10,7 @@ from multiprocessing import shared_memory
 
 from src.utils.ipc import (
     IPCMessage, BLECommand, ACCBatch, ECGBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
+    MSG_HEARTBEAT_BLINK,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
@@ -54,6 +55,10 @@ class UIManager:
         self.start_time = time.time()
         self.is_connected = False
         self.is_recording = False
+
+        # Heartbeat blink indicator state
+        self._blink_time = 0.0       # time.time() when last blink was triggered
+        self._blink_duration = 0.15  # seconds for the red flash to fade back to black
 
         # Assessment State
         self.assessment_active = False
@@ -223,7 +228,15 @@ class UIManager:
                 dpg.add_spacer(width=100)
                 with dpg.group():
                     dpg.add_text("HEART RATE", color=(150, 150, 150))
-                    dpg.add_text("0 BPM", tag="hr_display", color=(255, 50, 50))
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("0 BPM", tag="hr_display", color=(255, 50, 50))
+                        dpg.add_spacer(width=10)
+                        # Heartbeat blink indicator (small circle)
+                        with dpg.drawlist(width=20, height=20, tag="hb_blink_drawlist"):
+                            dpg.draw_circle(center=(10, 10), radius=8,
+                                            color=(255, 255, 255, 255),
+                                            fill=(0, 0, 0, 255),
+                                            tag="hb_blink_circle")
 
             dpg.add_spacer(height=10)
 
@@ -262,6 +275,7 @@ class UIManager:
             self.update_pacer()
             self.update_assessment()
             self.poll_ble_status()
+            self._update_heartbeat_blink()
 
             # Update Pacer Visuals
             if self.pacer_active:
@@ -295,6 +309,8 @@ class UIManager:
                     elif isinstance(msg, IPCMessage):
                         if msg.type == MSG_DATA_UPDATE:
                             self.handle_data_update(msg.payload)
+                        elif msg.type == MSG_HEARTBEAT_BLINK:
+                            self._blink_time = time.time()
                         elif msg.type == MSG_ASSESSMENT_RESULT:
                             self.handle_assessment_result(msg.payload)
                     elif isinstance(msg, ProcessedData):
@@ -426,6 +442,24 @@ class UIManager:
         self.ecg_chart.add_samples(batch.timestamp_unix, samples,
                                    batch.sample_rate, self.start_time)
         self.ecg_chart.update_plot(current_time)
+
+    # --- Heartbeat Blink ---
+
+    def _update_heartbeat_blink(self):
+        """Update the heartbeat indicator circle color each frame.
+
+        On blink: fill flashes red, then fades linearly back to black
+        over self._blink_duration seconds.
+        """
+        elapsed = time.time() - self._blink_time
+        if elapsed < self._blink_duration:
+            # Fade from 255 (red) → 0 (black) over the duration
+            t = elapsed / self._blink_duration
+            red = int(255 * (1.0 - t))
+            dpg.configure_item("hb_blink_circle", fill=(red, 0, 0, 255))
+        else:
+            # Resting state: black fill
+            dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
 
     # --- Pacer ---
 
