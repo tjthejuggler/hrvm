@@ -22,6 +22,7 @@ from src.processing.math_utils import (
     calculate_resonance_metrics, pan_tompkins_energy, find_peaks, reject_artifacts,
     calculate_metrics
 )
+from src.recording.session_recorder import SessionRecorder
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -73,6 +74,10 @@ class SignalProcessor:
         self.assessment_active = False
         self.current_assessment_tag = None
         self.assessment_data = {} # {tag: [amplitudes]}
+
+        # Session Recorder (auto-starts on first HR data)
+        self.session_recorder = SessionRecorder()
+        self._recorder_started = False
 
     def _design_bandpass(self) -> Tuple[np.ndarray, np.ndarray]:
         nyquist = 0.5 * self.sample_rate
@@ -132,6 +137,9 @@ class SignalProcessor:
             except Exception as e:
                 logger.error(f"Error in Signal Processor loop: {e}")
 
+        # Finalize session recording on shutdown
+        self._stop_session_recording()
+
     def forward_acc_batch(self, batch: ACCBatch):
         """Forward ACC data directly to GUI (no processing needed)."""
         try:
@@ -139,11 +147,36 @@ class SignalProcessor:
         except Exception as e:
             logger.error(f"Failed to forward ACC batch: {e}")
                 
+    def _start_session_recording(self):
+        """Start the session recorder on first HR data."""
+        if not self._recorder_started:
+            self.session_recorder.start()
+            self._recorder_started = True
+            logger.info("Session recording auto-started on first HR data.")
+
+    def _stop_session_recording(self):
+        """Stop the session recorder and write JSON file."""
+        if self._recorder_started and self.session_recorder.is_recording:
+            filepath = self.session_recorder.stop()
+            if filepath:
+                logger.info(f"Session JSON saved: {filepath}")
+            else:
+                logger.warning("Session recording stopped but no file was written.")
+            self._recorder_started = False
+
     def process_hr_batch(self, batch: HRBatch):
         """Process HR data received directly from the BLE HR characteristic."""
         timestamp = batch.timestamp_unix
         hr_bpm = batch.heart_rate_bpm
         rr_intervals = batch.rr_intervals_ms
+
+        # Auto-start session recording on first HR data
+        self._start_session_recording()
+
+        # Feed data to session recorder
+        self.session_recorder.add_hr_sample(bpm=hr_bpm)
+        for rr_ms in rr_intervals:
+            self.session_recorder.add_rr_interval(rr_ms=rr_ms)
 
         # Add RR intervals to buffers
         for rr_ms in rr_intervals:

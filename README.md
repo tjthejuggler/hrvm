@@ -5,6 +5,7 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 
 ## Features
 - **Real-Time HR & HRV:** Streams heart rate and RR intervals via the standard BLE Heart Rate Measurement characteristic, calculates RMSSD/SDNN in real-time.
+- **Chess-Coach Session Recording:** Automatically records HR sessions to JSON files for integration with the chess-coach analytics web app. Files are saved to `~/Projects/chess-coach/data/hr_sessions/` in format v1.0 with 1Hz HR, raw RR intervals, and 5s-window RMSSD/SDNN (with artifact rejection). Recording auto-starts on first HR data and auto-stops on shutdown.
 - **Heartbeat Blink Indicator:** A small circle next to the HR display that flashes red on each detected heartbeat (via ECG R-wave detection) and fades back to black within 150ms. Uses a fast visual-only path from the ECG stream (~100-150ms latency) while keeping the standard HR service for accurate metrics.
 - **External LED Ball Support:** Optionally drives an external LED ball (UDP, port 41412) in sync with the heartbeat blink. Uses the ball's native protocol (8-byte header + 4-byte `0x0a R G B` color command). Enable/disable and set the IP address from the "LED Ball" section in the left settings panel. Default IP: `10.122.252.133`.
 - **Heartbeat Chart:** Individual heartbeats displayed as a stem plot with RR intervals (ms) and timing for each beat.
@@ -70,6 +71,7 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
 - **`src/gui/`**: User Interface using `Dear PyGui`. Charts are modular collapsible widgets in `charts.py`.
 - **`src/gui/led_ball.py`**: `LEDBallController` — drives an external LED ball over UDP using the ball's native protocol (8-byte header + `0x0a R G B` color command). Integrated with the heartbeat blink in `ui_manager.py`.
 - **`src/gui/charts.py`**: Collapsible chart widgets: BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart, RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart, ACCChart, ECGChart.
+- **`src/recording/`**: Session recording for chess-coach integration. `SessionRecorder` accumulates HR/RR data in memory and writes JSON files on session stop.
 - **`src/database/`**: SQLite storage for session data.
 - **`src/utils/ipc.py`**: IPC data classes (`HRBatch`, `ECGBatch`, `ACCBatch`, `ProcessedData`, `BLECommand`).
 
@@ -111,4 +113,4 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
-2026-02-15 14:04 CET
+2026-02-15 16:58 CET
