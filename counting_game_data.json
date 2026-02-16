@@ -1,0 +1,18 @@
+[
+  {
+    "timestamp": 1771233130.9803479,
+    "duration_s": 49.53,
+    "guessed_count": 46,
+    "actual_beats": 51,
+    "guessed_bpm": 55.7,
+    "actual_bpm": 61.8
+  },
+  {
+    "timestamp": 1771235590.3451042,
+    "duration_s": 59.34,
+    "guessed_count": 41,
+    "actual_beats": 63,
+    "guessed_bpm": 41.5,
+    "actual_bpm": 63.7
+  }
+]

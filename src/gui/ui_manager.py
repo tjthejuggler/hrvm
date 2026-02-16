@@ -25,6 +25,7 @@ from src.gui.charts import (
     RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart,
     ACCChart, ECGChart
 )
+from src.gui.counting_game import CountingGameWidget
 from src.gui.led_ball import LEDBallController
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
@@ -114,6 +115,9 @@ class UIManager:
         self.coherence_chart = CoherenceHistoryChart()
         self.acc_chart = ACCChart()
         self.ecg_chart = ECGChart()
+
+        # Counting game widget (shown only in counting mode)
+        self.counting_game = CountingGameWidget()
 
         # UI Element Tags
         self.window_tag = "Primary Window"
@@ -307,6 +311,10 @@ class UIManager:
             self.poll_ble_status()
             self._update_heartbeat_blink()
 
+            # Counting game tick (checks timer expiry each frame)
+            if self.session_mode == SESSION_MODE_COUNTING:
+                self.counting_game.tick()
+
             # Update Pacer Visuals
             if self.pacer_active:
                 self.pacer.update(600, 300)
@@ -408,6 +416,11 @@ class UIManager:
             self.poincare_chart.add_rr(data.rr_intervals)
             self.poincare_chart.update_plot()
 
+            # Feed RR intervals to counting game (if active)
+            if self.session_mode == SESSION_MODE_COUNTING:
+                for rr in data.rr_intervals:
+                    self.counting_game.feed_rr(rr)
+
         # Save to DB if recording
         if self.is_recording and self.current_session_id:
             self.db.save_hrv_data(self.current_session_id, data)
@@ -460,6 +473,11 @@ class UIManager:
             self.poincare_chart.add_rr(rr_data)
             self.poincare_chart.update_plot()
 
+            # Feed RR intervals to counting game (if active)
+            if self.session_mode == SESSION_MODE_COUNTING:
+                for rr in rr_data:
+                    self.counting_game.feed_rr(rr)
+
     def handle_acc_data(self, batch: ACCBatch):
         """Handle accelerometer data from BLE."""
         current_time = time.time() - self.start_time
@@ -483,7 +501,16 @@ class UIManager:
         On blink: fill flashes red, then fades linearly back to black
         over self._blink_duration seconds.  The external LED ball is
         driven via blink() in process_incoming_data (once per beat).
+
+        Suppressed during counting-game counting phase to prevent
+        the user from using the visual cue to count heartbeats.
         """
+        # Suppress blink while the counting game is actively counting
+        if (self.session_mode == SESSION_MODE_COUNTING
+                and self.counting_game.controller.state == "counting"):
+            dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
+            return
+
         elapsed = time.time() - self._blink_time
         if elapsed < self._blink_duration:
             # Fade from 255 (red) → 0 (black) over the duration
@@ -737,6 +764,16 @@ class UIManager:
                            {KEY_SESSION_MODE: mode}))
         except Exception as e:
             logger.error(f"Failed to send session mode: {e}")
+
+        # Build / destroy counting game widget based on mode
+        if mode == SESSION_MODE_COUNTING:
+            if not self.counting_game.is_built:
+                self.counting_game.build("charts_area")
+                # Move counting game group to the top of charts_area
+                dpg.move_item(self.counting_game.TAG_GROUP,
+                              parent="charts_area", before="biofeedback_node")
+        else:
+            self.counting_game.destroy()
 
         # Now proceed with the actual connection
         self.start_stream()
