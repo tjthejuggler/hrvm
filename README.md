@@ -6,7 +6,8 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 ## Features
 - **Real-Time HR & HRV:** Streams heart rate and RR intervals via the standard BLE Heart Rate Measurement characteristic, calculates RMSSD/SDNN in real-time.
 - **BLE Auto-Reconnect:** Automatically reconnects to the Polar H10 if the Bluetooth connection drops unexpectedly (e.g., walking out of range). Uses exponential backoff (2s → 4s → 8s → ... up to 30s max). All previously active streams (HR, ACC, ECG) are re-enabled on reconnect. Session recording is preserved across disconnects — no data loss. The GUI shows an orange "Reconnecting..." status during attempts. Clicking "Disconnect" during reconnect cancels the auto-reconnect.
-- **Chess-Coach Session Recording:** Automatically records HR sessions to JSON files for integration with the chess-coach analytics web app. Files are saved to `~/Projects/chess-coach/data/hr_sessions/` in format v1.0 with 1Hz HR, raw RR intervals, and 5s-window RMSSD/SDNN (with artifact rejection). Recording auto-starts on first HR data and auto-stops on shutdown.
+- **Session Mode Selection:** When clicking "Connect", a modal popup asks the user to choose a session mode: **Chess**, **Counting**, or **None**. The selected mode is displayed in the top bar and sent to the signal processor via IPC. Only "Chess" mode enables JSON session recording; "Counting" and "None" connect without recording. Auto-connect (`--auto-connect`) defaults to "None" mode.
+- **Chess-Coach Session Recording:** Records HR sessions to JSON files for integration with the chess-coach analytics web app (only when "Chess" mode is selected). Files are saved to `~/Projects/chess-coach/data/hr_sessions/` in format v1.0 with 1Hz HR, raw RR intervals, and 5s-window RMSSD/SDNN (with artifact rejection). Recording auto-starts on first HR data and auto-stops on shutdown.
 - **Heartbeat Blink Indicator:** A small circle next to the HR display that flashes red on each detected heartbeat (via ECG R-wave detection) and fades back to black within 150ms. Uses a fast visual-only path from the ECG stream (~100-150ms latency) while keeping the standard HR service for accurate metrics.
 - **External LED Ball Support:** Optionally drives an external LED ball (UDP, port 41412) in sync with the heartbeat blink. Uses the ball's native protocol (8-byte header + 4-byte `0x0a R G B` color command). Enable/disable and set the IP address from the "LED Ball" section in the left settings panel. Default IP: `10.122.252.133`.
 - **Heartbeat Chart:** Individual heartbeats displayed as a stem plot with RR intervals (ms) and timing for each beat.
@@ -56,11 +57,11 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
    ```bash
    python src/main.py
    ```
-3. **Connect:** Click the "Connect" button in the top bar. The app will scan for a device named "Polar H10..." and connect automatically. You may see a system pairing prompt — click "Deny" once to proceed (the GATT connection still works without OS-level pairing).
+3. **Connect:** Click the "Connect" button in the top bar. A popup will ask you to select a session mode (**Chess**, **Counting**, or **None**). Choose "Chess" to enable JSON session recording for chess-coach integration. The app will then scan for a device named "Polar H10..." and connect automatically. You may see a system pairing prompt — click "Deny" once to proceed (the GATT connection still works without OS-level pairing).
 4. **Data streaming:** Once connected, the app streams HR/RR interval data via BLE HR Measurement (`0x2A37`), accelerometer data, and ECG waveform data via the Polar PMD service. Note: PMD data may take up to 30–45 seconds to begin flowing due to BlueZ propagation delays.
 
 ### Controls
-- **Connect/Disconnect:** Connects to the Polar H10 and begins data streaming.
+- **Connect/Disconnect:** Opens a session mode selection popup (Chess/Counting/None), then connects to the Polar H10 and begins data streaming. The selected mode is shown in the top bar.
 - **Pacer Settings:** Adjust the target breathing rate (BPM).
 - **Audio Feedback:** Toggle real-time heart rate sonification.
 - **LED Ball:** Enable/disable the external LED ball and set its IP address. The ball flashes red on each heartbeat when enabled.
@@ -110,9 +111,10 @@ If the application fails to find the device or connects and immediately disconne
 - **Coherence:** Power Spectral Density (PSD) analysis using Welch's method.
 - **Audio:** Real-time sine wave synthesis with smooth frequency transitions.
 - **Auto-Reconnect:** On unexpected disconnect, `_on_disconnect()` checks `_user_disconnect` flag. If `False`, schedules `_auto_reconnect()` as an asyncio task with exponential backoff (2s initial, 2× factor, 30s max). Remembers which streams (HR/ACC/ECG) were active and re-enables them after reconnect. The GUI receives `{"status": "reconnecting"}` IPC messages and shows orange "Reconnecting..." text. User can cancel by clicking "Disconnect". Session recording in the signal processor is unaffected — it lives in a separate process and simply resumes receiving data once the BLE link is restored.
+- **Session Mode IPC:** The GUI sends `MSG_CMD_SET_SESSION_MODE` via the math control pipe before connecting. The signal processor stores the mode and only starts `SessionRecorder` when mode is `"chess"`. Three modes are defined in `ipc.py`: `SESSION_MODE_CHESS`, `SESSION_MODE_COUNTING`, `SESSION_MODE_NONE`.
 
 ## License
 MIT License
 
 ## Last Updated
-2026-02-16 08:48 CET
+2026-02-16 09:43 CET

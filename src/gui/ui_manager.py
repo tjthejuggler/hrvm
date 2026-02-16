@@ -13,8 +13,10 @@ from src.utils.ipc import (
     MSG_HEARTBEAT_BLINK,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
+    MSG_CMD_SET_SESSION_MODE,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
     KEY_IS_ARTIFACT, KEY_PACER_BPM, KEY_ASSESSMENT_TAG, KEY_OPTIMAL_BPM,
+    KEY_SESSION_MODE, SESSION_MODE_CHESS, SESSION_MODE_COUNTING, SESSION_MODE_NONE,
     ProcessedData, ProcessingConfig, CommandType, SystemCommand
 )
 from src.gui.audio_feedback import AudioFeedback
@@ -60,6 +62,7 @@ class UIManager:
         self.start_time = time.time()
         self.is_connected = False
         self.is_recording = False
+        self.session_mode = None  # Set by mode selection popup on connect
 
         # Heartbeat blink indicator state
         self._blink_time = 0.0       # time.time() when last blink was triggered
@@ -162,6 +165,9 @@ class UIManager:
             dpg.add_spacer(width=20)
             dpg.add_text("Battery: ")
             dpg.add_text("N/A", tag="battery_text")
+            dpg.add_spacer(width=20)
+            dpg.add_text("Mode: ")
+            dpg.add_text("--", tag="mode_text", color=(150, 150, 150))
 
             dpg.add_spacer(width=50)
             dpg.add_combo(
@@ -283,7 +289,16 @@ class UIManager:
         threading.Thread(target=self.process_incoming_data, daemon=True).start()
 
         if self.auto_connect:
-            logger.info("Auto-connecting to device...")
+            logger.info("Auto-connecting to device (mode: none)...")
+            self.session_mode = SESSION_MODE_NONE
+            dpg.set_value("mode_text", "none")
+            dpg.configure_item("mode_text", color=(150, 150, 150))
+            try:
+                self.math_control_pipe.send(
+                    IPCMessage(MSG_CMD_SET_SESSION_MODE,
+                               {KEY_SESSION_MODE: SESSION_MODE_NONE}))
+            except Exception as e:
+                logger.error(f"Failed to send session mode on auto-connect: {e}")
             self.start_stream()
 
         while dpg.is_dearpygui_running() and self.running:
@@ -669,12 +684,64 @@ class UIManager:
 
     def handle_connect_button(self):
         if not self.is_connected:
-            self.start_stream()
-            dpg.set_value("status_text", "Connecting...")
-            dpg.configure_item("status_text", color=(255, 255, 0))
+            self._show_mode_selection_popup()
         else:
             self.stop_stream()
             dpg.set_value("status_text", "Disconnecting...")
+
+    def _show_mode_selection_popup(self):
+        """Show a modal popup asking the user to select a session mode."""
+        popup_tag = "mode_selection_popup"
+        # Remove any existing popup first
+        if dpg.does_item_exist(popup_tag):
+            dpg.delete_item(popup_tag)
+
+        with dpg.window(label="Select Session Mode", modal=True,
+                        tag=popup_tag, width=320, height=200,
+                        no_resize=True, no_move=False,
+                        on_close=lambda: dpg.delete_item(popup_tag)):
+            dpg.add_text("What is this session for?")
+            dpg.add_spacer(height=10)
+            dpg.add_button(label="Chess", width=-1,
+                           callback=lambda: self._on_mode_selected(SESSION_MODE_CHESS))
+            dpg.add_spacer(height=5)
+            dpg.add_button(label="Counting", width=-1,
+                           callback=lambda: self._on_mode_selected(SESSION_MODE_COUNTING))
+            dpg.add_spacer(height=5)
+            dpg.add_button(label="None", width=-1,
+                           callback=lambda: self._on_mode_selected(SESSION_MODE_NONE))
+
+    def _on_mode_selected(self, mode: str):
+        """Handle mode selection from the popup, then proceed with connect."""
+        self.session_mode = mode
+        logger.info(f"Session mode selected: {mode}")
+
+        # Update mode display in top bar
+        mode_colors = {
+            SESSION_MODE_CHESS: (0, 200, 100),     # green
+            SESSION_MODE_COUNTING: (100, 180, 255), # blue
+            SESSION_MODE_NONE: (150, 150, 150),     # grey
+        }
+        dpg.set_value("mode_text", mode)
+        dpg.configure_item("mode_text", color=mode_colors.get(mode, (150, 150, 150)))
+
+        # Close the popup
+        popup_tag = "mode_selection_popup"
+        if dpg.does_item_exist(popup_tag):
+            dpg.delete_item(popup_tag)
+
+        # Send mode to signal processor
+        try:
+            self.math_control_pipe.send(
+                IPCMessage(MSG_CMD_SET_SESSION_MODE,
+                           {KEY_SESSION_MODE: mode}))
+        except Exception as e:
+            logger.error(f"Failed to send session mode: {e}")
+
+        # Now proceed with the actual connection
+        self.start_stream()
+        dpg.set_value("status_text", "Connecting...")
+        dpg.configure_item("status_text", color=(255, 255, 0))
 
     def handle_session_toggle(self):
         if not self.is_recording:
