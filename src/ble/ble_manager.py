@@ -165,9 +165,18 @@ class BleakManager:
     - PMD Data must use D-Bus StartNotify (use_start_notify=True) to avoid
       bluetoothd crashes with AcquireNotify on high-freq PMD streams
     - PMD start commands use format: type(1) + array_len(1) + value(2) per setting
+
+    Auto-reconnect: When an unexpected disconnect occurs (not user-initiated),
+    the manager will automatically retry connection with exponential backoff
+    (2s, 4s, 8s, ... up to 30s) and re-enable all previously active streams.
     """
 
     POLAR_H10_NAME_PREFIX = "Polar H10"
+
+    # Auto-reconnect settings
+    RECONNECT_INITIAL_DELAY = 2.0   # seconds
+    RECONNECT_MAX_DELAY = 30.0      # seconds
+    RECONNECT_BACKOFF_FACTOR = 2.0
 
     def __init__(self, data_pipe: Connection, control_pipe: Connection, mock_mode: bool = False):
         self.data_pipe = data_pipe
@@ -185,6 +194,14 @@ class BleakManager:
         self._agent_registered = False
         self._pmd_response_event: Optional[asyncio.Event] = None
         self._pmd_response_ok = False
+
+        # Auto-reconnect state
+        self._user_disconnect = False      # True when user explicitly disconnects
+        self._reconnecting = False         # True while auto-reconnect loop is active
+        self._was_streaming_hr = False     # Track which streams were active before disconnect
+        self._was_streaming_acc = False
+        self._was_streaming_ecg = False
+        self._reconnect_task: Optional[asyncio.Task] = None
 
     async def _ensure_agent(self):
         """Register the auto-accept D-Bus agent once (idempotent)."""
@@ -263,10 +280,97 @@ class BleakManager:
             return False
 
     def _on_disconnect(self, client: BleakClient):
+        """Handle BLE disconnection. Triggers auto-reconnect if not user-initiated."""
         logger.warning("Disconnected from device.")
+
+        # Remember which streams were active before disconnect for re-enabling
+        if self.is_streaming:
+            self._was_streaming_hr = True
+        if self.acc_streaming:
+            self._was_streaming_acc = True
+        if self.ecg_streaming:
+            self._was_streaming_ecg = True
+
         self.is_streaming = False
         self.acc_streaming = False
         self.ecg_streaming = False
+
+        if self._user_disconnect or self.should_exit:
+            # User explicitly disconnected or app is exiting — don't reconnect
+            logger.info("User-initiated disconnect; no auto-reconnect.")
+            try:
+                self.control_pipe.send({"status": "disconnected"})
+            except Exception:
+                pass
+        else:
+            # Unexpected disconnect — start auto-reconnect
+            logger.info("Unexpected disconnect detected. Starting auto-reconnect...")
+            try:
+                self.control_pipe.send({"status": "reconnecting"})
+            except Exception:
+                pass
+            self._reconnecting = True
+            # Schedule the reconnect coroutine on the running event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                self._reconnect_task = loop.create_task(self._auto_reconnect())
+
+    async def _auto_reconnect(self):
+        """Attempt to reconnect with exponential backoff.
+
+        Retries until successful, user sends disconnect/exit, or should_exit is set.
+        On success, re-enables all streams that were active before the disconnect.
+        """
+        delay = self.RECONNECT_INITIAL_DELAY
+        attempt = 0
+
+        while not self.should_exit and not self._user_disconnect:
+            attempt += 1
+            logger.info(f"Auto-reconnect attempt #{attempt} in {delay:.1f}s...")
+            await asyncio.sleep(delay)
+
+            # Check again after sleep — user may have cancelled
+            if self.should_exit or self._user_disconnect:
+                break
+
+            try:
+                success = await self.scan_and_connect(timeout=10.0)
+                if success:
+                    logger.info(f"Auto-reconnect succeeded on attempt #{attempt}.")
+
+                    # Re-enable HR stream
+                    if self._was_streaming_hr:
+                        await self.enable_hr_stream()
+                        await asyncio.sleep(1.0)
+
+                    # Re-subscribe to PMD and re-enable ACC/ECG
+                    if self._was_streaming_acc or self._was_streaming_ecg:
+                        pmd_ok = await self._subscribe_pmd()
+                        if pmd_ok:
+                            if self._was_streaming_acc:
+                                await self.enable_acc_stream()
+                                await asyncio.sleep(0.5)
+                            if self._was_streaming_ecg:
+                                await self.enable_ecg_stream()
+
+                    self._reconnecting = False
+                    try:
+                        self.control_pipe.send({"status": "connected"})
+                    except Exception:
+                        pass
+                    logger.info("All streams re-enabled after reconnect.")
+                    return
+                else:
+                    logger.warning(f"Auto-reconnect attempt #{attempt} failed (scan/connect).")
+            except Exception as e:
+                logger.warning(f"Auto-reconnect attempt #{attempt} error: {e}")
+
+            # Exponential backoff
+            delay = min(delay * self.RECONNECT_BACKOFF_FACTOR, self.RECONNECT_MAX_DELAY)
+
+        # Loop exited without success
+        self._reconnecting = False
+        logger.info("Auto-reconnect cancelled (user disconnect or exit).")
         try:
             self.control_pipe.send({"status": "disconnected"})
         except Exception:
@@ -677,6 +781,17 @@ class BleakManager:
 
         logger.info(f"[MOCK] Mock ECG data generation stopped. Total batches: {batch_count}")
 
+    def _cancel_reconnect(self):
+        """Cancel any active auto-reconnect task."""
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+            logger.info("Auto-reconnect task cancelled.")
+        self._reconnecting = False
+        self._was_streaming_hr = False
+        self._was_streaming_acc = False
+        self._was_streaming_ecg = False
+
     async def handle_control_messages(self) -> None:
         """Process commands from GUI (connect/disconnect/exit)."""
         try:
@@ -689,6 +804,10 @@ class BleakManager:
                     if isinstance(msg, BLECommand):
                         logger.info(f"Received command: {msg.command}")
                         if msg.command == "connect":
+                            # User explicitly connecting — cancel any reconnect
+                            self._user_disconnect = False
+                            self._cancel_reconnect()
+
                             if self.mock_mode:
                                 await self.scan_and_connect()
                                 await self.enable_hr_stream()
@@ -717,6 +836,10 @@ class BleakManager:
                                     logger.error(f"Traceback: {traceback.format_exc()}")
                                     self.control_pipe.send({"status": "disconnected"})
                         elif msg.command == "disconnect":
+                            # User explicitly disconnecting — prevent auto-reconnect
+                            self._user_disconnect = True
+                            self._cancel_reconnect()
+
                             if self.mock_mode:
                                 self.is_streaming = False
                                 self.acc_streaming = False
@@ -755,7 +878,11 @@ class BleakManager:
                                     pass
                                 await self.client.disconnect()
                                 self.control_pipe.send({"status": "disconnected"})
+                            else:
+                                # Not connected (maybe reconnecting was cancelled)
+                                self.control_pipe.send({"status": "disconnected"})
                         elif msg.command == "exit":
+                            self._cancel_reconnect()
                             self.should_exit = True
                 except EOFError:
                     logger.warning("Control pipe closed.")

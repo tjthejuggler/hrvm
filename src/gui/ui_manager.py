@@ -710,6 +710,16 @@ class UIManager:
                             dpg.configure_item("connect_btn", label="Connect")
                             dpg.configure_item("session_btn", show=False)
                             self.is_recording = False
+                        elif status == "reconnecting":
+                            # Auto-reconnect in progress — keep session alive,
+                            # show yellow status, keep Disconnect button available
+                            self.is_connected = False
+                            dpg.set_value("status_text", "Reconnecting...")
+                            dpg.configure_item("status_text", color=(255, 165, 0))
+                            dpg.configure_item("connect_btn", label="Disconnect")
+                            # Don't hide session_btn or reset is_recording —
+                            # the session recorder keeps accumulating data and
+                            # will resume when the device reconnects.
                     if "battery" in msg:
                         dpg.set_value("battery_text", f"{msg['battery']}%")
         except Exception as e:

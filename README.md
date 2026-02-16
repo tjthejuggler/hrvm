@@ -5,6 +5,7 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 
 ## Features
 - **Real-Time HR & HRV:** Streams heart rate and RR intervals via the standard BLE Heart Rate Measurement characteristic, calculates RMSSD/SDNN in real-time.
+- **BLE Auto-Reconnect:** Automatically reconnects to the Polar H10 if the Bluetooth connection drops unexpectedly (e.g., walking out of range). Uses exponential backoff (2s → 4s → 8s → ... up to 30s max). All previously active streams (HR, ACC, ECG) are re-enabled on reconnect. Session recording is preserved across disconnects — no data loss. The GUI shows an orange "Reconnecting..." status during attempts. Clicking "Disconnect" during reconnect cancels the auto-reconnect.
 - **Chess-Coach Session Recording:** Automatically records HR sessions to JSON files for integration with the chess-coach analytics web app. Files are saved to `~/Projects/chess-coach/data/hr_sessions/` in format v1.0 with 1Hz HR, raw RR intervals, and 5s-window RMSSD/SDNN (with artifact rejection). Recording auto-starts on first HR data and auto-stops on shutdown.
 - **Heartbeat Blink Indicator:** A small circle next to the HR display that flashes red on each detected heartbeat (via ECG R-wave detection) and fades back to black within 150ms. Uses a fast visual-only path from the ECG stream (~100-150ms latency) while keeping the standard HR service for accurate metrics.
 - **External LED Ball Support:** Optionally drives an external LED ball (UDP, port 41412) in sync with the heartbeat blink. Uses the ball's native protocol (8-byte header + 4-byte `0x0a R G B` color command). Enable/disable and set the IP address from the "LED Ball" section in the left settings panel. Default IP: `10.122.252.133`.
@@ -66,7 +67,7 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
 - **Resonance Assessment:** Click "Start Assessment" to begin the automated protocol (approx. 15 mins). Follow the on-screen pacer instructions.
 
 ## Architecture
-- **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, and D-Bus `StartNotify` for reliable PMD streaming.
+- **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, D-Bus `StartNotify` for reliable PMD streaming, and automatic reconnection with exponential backoff on unexpected disconnects.
 - **`src/processing/`**: Signal processing (filtering, interpolation, FFT) using `numpy` and `scipy`. Handles `HRBatch`, `ECGBatch`, and forwards `ACCBatch` data.
 - **`src/gui/`**: User Interface using `Dear PyGui`. Charts are modular collapsible widgets in `charts.py`.
 - **`src/gui/led_ball.py`**: `LEDBallController` — drives an external LED ball over UDP using the ball's native protocol (8-byte header + `0x0a R G B` color command). Integrated with the heartbeat blink in `ui_manager.py`.
@@ -108,9 +109,10 @@ If the application fails to find the device or connects and immediately disconne
 - **Interpolation:** Cubic Spline / Pchip interpolation for smooth HR visualization.
 - **Coherence:** Power Spectral Density (PSD) analysis using Welch's method.
 - **Audio:** Real-time sine wave synthesis with smooth frequency transitions.
+- **Auto-Reconnect:** On unexpected disconnect, `_on_disconnect()` checks `_user_disconnect` flag. If `False`, schedules `_auto_reconnect()` as an asyncio task with exponential backoff (2s initial, 2× factor, 30s max). Remembers which streams (HR/ACC/ECG) were active and re-enables them after reconnect. The GUI receives `{"status": "reconnecting"}` IPC messages and shows orange "Reconnecting..." text. User can cancel by clicking "Disconnect". Session recording in the signal processor is unaffected — it lives in a separate process and simply resumes receiving data once the BLE link is restored.
 
 ## License
 MIT License
 
 ## Last Updated
-2026-02-15 16:58 CET
+2026-02-16 08:48 CET
