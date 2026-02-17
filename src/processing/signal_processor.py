@@ -80,7 +80,7 @@ class SignalProcessor:
         # Session Recorder (conditionally started based on session mode)
         self.session_recorder = SessionRecorder()
         self._recorder_started = False
-        self.session_mode = SESSION_MODE_NONE
+        self.session_mode = SESSION_MODE_NONE # Kept for compatibility, but effectively unused/default
 
     def _design_bandpass(self) -> Tuple[np.ndarray, np.ndarray]:
         nyquist = 0.5 * self.sample_rate
@@ -313,9 +313,10 @@ class SignalProcessor:
             self.stop_assessment()
 
         elif message.type == MSG_CMD_SET_SESSION_MODE:
+            # Deprecated command, but keeping handler to prevent crash if old message received
             new_mode = message.payload.get(KEY_SESSION_MODE, SESSION_MODE_NONE)
             self.session_mode = new_mode
-            logger.info(f"Session mode set to: {self.session_mode}")
+            logger.info(f"Session mode set to: {self.session_mode} (DEPRECATED)")
 
         elif message.type == MSG_CMD_START_RECORDING:
             self._start_session_recording()

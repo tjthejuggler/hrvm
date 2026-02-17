@@ -64,7 +64,7 @@ class UIManager:
         self.is_connected = False
         self.is_recording = False
         self.is_json_recording = False # New flag for JSON recording
-        self.session_mode = None  # Set by mode selection popup on connect
+        # self.session_mode = None  # Removed session mode
 
         # Heartbeat blink indicator state
         self._blink_time = 0.0       # time.time() when last blink was triggered
@@ -147,17 +147,55 @@ class UIManager:
 
             # --- Charts Section (collapsible, no tabs) ---
             with dpg.child_window(width=-1, height=-1, border=True, tag="charts_area"):
-                dpg.add_text("Charts", color=(0, 255, 255))
-                dpg.add_separator()
-                self.biofeedback_chart.build("charts_area")
-                self.heartbeat_chart.build("charts_area")
-                self.acc_chart.build("charts_area")
-                self.ecg_chart.build("charts_area")
-                self.tachogram_chart.build("charts_area")
-                self.poincare_chart.build("charts_area")
-                self.rmssd_chart.build("charts_area")
-                self.sdnn_chart.build("charts_area")
-                self.coherence_chart.build("charts_area")
+                # dpg.add_text("Charts Area", color=(0, 255, 255))
+                # dpg.add_separator()
+
+                # --- Apps Section ---
+                with dpg.theme(tag="apps_header_theme"):
+                    with dpg.theme_component(dpg.mvCollapsingHeader):
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (100, 50, 200, 100))  # Purple tint
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (120, 70, 220, 150))
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (140, 90, 240, 200))
+                        dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
+                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10) # Increase size
+
+                with dpg.collapsing_header(label="APPS", tag="header_apps", default_open=True):
+                    dpg.bind_item_theme(dpg.last_item(), "apps_header_theme")
+                    
+                    # We create a container (group) for apps so they have a consistent parent
+                    with dpg.group(tag="apps_container"):
+                        self.counting_game.build("apps_container")
+
+                # --- Graphs Section ---
+                with dpg.theme(tag="graphs_header_theme"):
+                    with dpg.theme_component(dpg.mvCollapsingHeader):
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 100, 200, 100))  # Blue tint
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (20, 120, 220, 150))
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (40, 140, 240, 200))
+                        dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
+                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10) # Increase size
+
+                with dpg.collapsing_header(label="GRAPHS", tag="header_graphs", default_open=True):
+                    dpg.bind_item_theme(dpg.last_item(), "graphs_header_theme")
+                    
+                    # We create a container (group) for graphs so they have a consistent parent
+                    with dpg.group(tag="graphs_container"):
+                        self.biofeedback_chart.build("graphs_container")
+                        self.heartbeat_chart.build("graphs_container")
+                        self.acc_chart.build("graphs_container")
+                        self.ecg_chart.build("graphs_container")
+                        self.tachogram_chart.build("graphs_container")
+                        self.poincare_chart.build("graphs_container")
+                        self.rmssd_chart.build("graphs_container")
+                        self.sdnn_chart.build("graphs_container")
+                        self.coherence_chart.build("graphs_container")
+
+                with dpg.theme(tag="theme_graphs_header"):
+                    with dpg.theme_component(dpg.mvCollapsingHeader):
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 100, 150, 150)) # Blue tint
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (20, 120, 170, 170))
+                        dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 255, 255, 255))
+                dpg.bind_item_theme("header_graphs", "theme_graphs_header")
 
         dpg.set_primary_window(self.window_tag, True)
 
@@ -324,8 +362,8 @@ class UIManager:
             self._update_heartbeat_blink()
 
             # Counting game tick (checks timer expiry each frame)
-            if self.session_mode == SESSION_MODE_COUNTING:
-                self.counting_game.tick()
+            # if self.session_mode == SESSION_MODE_COUNTING:
+            self.counting_game.tick()
 
             # Update Pacer Visuals
             if self.pacer_active:
@@ -428,10 +466,10 @@ class UIManager:
             self.poincare_chart.add_rr(data.rr_intervals)
             self.poincare_chart.update_plot()
 
-            # Feed RR intervals to counting game (if active)
-            if self.session_mode == SESSION_MODE_COUNTING:
-                for rr in data.rr_intervals:
-                    self.counting_game.feed_rr(rr)
+            # Feed RR intervals to counting game (always active if built)
+            # if self.session_mode == SESSION_MODE_COUNTING:
+            for rr in data.rr_intervals:
+                self.counting_game.feed_rr(rr)
 
         # Save to DB if recording
         if self.is_recording and self.current_session_id:
@@ -485,10 +523,10 @@ class UIManager:
             self.poincare_chart.add_rr(rr_data)
             self.poincare_chart.update_plot()
 
-            # Feed RR intervals to counting game (if active)
-            if self.session_mode == SESSION_MODE_COUNTING:
-                for rr in rr_data:
-                    self.counting_game.feed_rr(rr)
+            # Feed RR intervals to counting game (always active if built)
+            # if self.session_mode == SESSION_MODE_COUNTING:
+            for rr in rr_data:
+                self.counting_game.feed_rr(rr)
 
     def handle_acc_data(self, batch: ACCBatch):
         """Handle accelerometer data from BLE."""
@@ -518,8 +556,8 @@ class UIManager:
         the user from using the visual cue to count heartbeats.
         """
         # Suppress blink while the counting game is actively counting
-        if (self.session_mode == SESSION_MODE_COUNTING
-                and self.counting_game.controller.state == "counting"):
+        # if (self.session_mode == SESSION_MODE_COUNTING
+        if (self.counting_game.controller.state == "counting"):
             dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
             return
 
@@ -723,70 +761,13 @@ class UIManager:
 
     def handle_connect_button(self):
         if not self.is_connected:
-            self._show_mode_selection_popup()
+            # Directly connect, no popup
+            self.start_stream()
+            dpg.set_value("status_text", "Connecting...")
+            dpg.configure_item("status_text", color=(255, 255, 0))
         else:
             self.stop_stream()
             dpg.set_value("status_text", "Disconnecting...")
-
-    def _show_mode_selection_popup(self):
-        """Show a modal popup asking the user to select a session mode."""
-        popup_tag = "mode_selection_popup"
-        # Remove any existing popup first
-        if dpg.does_item_exist(popup_tag):
-            dpg.delete_item(popup_tag)
-
-        with dpg.window(label="Select Session Mode", modal=True,
-                        tag=popup_tag, width=320, height=160,
-                        no_resize=True, no_move=False,
-                        on_close=lambda: dpg.delete_item(popup_tag)):
-            dpg.add_text("What is this session for?")
-            dpg.add_spacer(height=10)
-            dpg.add_button(label="Counting", width=-1,
-                           callback=lambda: self._on_mode_selected(SESSION_MODE_COUNTING))
-            dpg.add_spacer(height=5)
-            dpg.add_button(label="None", width=-1,
-                           callback=lambda: self._on_mode_selected(SESSION_MODE_NONE))
-
-    def _on_mode_selected(self, mode: str):
-        """Handle mode selection from the popup, then proceed with connect."""
-        self.session_mode = mode
-        logger.info(f"Session mode selected: {mode}")
-
-        # Update mode display in top bar
-        mode_colors = {
-            SESSION_MODE_COUNTING: (100, 180, 255), # blue
-            SESSION_MODE_NONE: (150, 150, 150),     # grey
-        }
-        dpg.set_value("mode_text", mode)
-        dpg.configure_item("mode_text", color=mode_colors.get(mode, (150, 150, 150)))
-
-        # Close the popup
-        popup_tag = "mode_selection_popup"
-        if dpg.does_item_exist(popup_tag):
-            dpg.delete_item(popup_tag)
-
-        # Send mode to signal processor
-        try:
-            self.math_control_pipe.send(
-                IPCMessage(MSG_CMD_SET_SESSION_MODE,
-                           {KEY_SESSION_MODE: mode}))
-        except Exception as e:
-            logger.error(f"Failed to send session mode: {e}")
-
-        # Build / destroy counting game widget based on mode
-        if mode == SESSION_MODE_COUNTING:
-            if not self.counting_game.is_built:
-                self.counting_game.build("charts_area")
-                # Move counting game group to the top of charts_area
-                dpg.move_item(self.counting_game.TAG_GROUP,
-                              parent="charts_area", before="biofeedback_node")
-        else:
-            self.counting_game.destroy()
-
-        # Now proceed with the actual connection
-        self.start_stream()
-        dpg.set_value("status_text", "Connecting...")
-        dpg.configure_item("status_text", color=(255, 255, 0))
 
     def handle_session_toggle(self):
         if not self.is_recording:

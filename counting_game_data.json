@@ -14,5 +14,13 @@
     "actual_beats": 63,
     "guessed_bpm": 41.5,
     "actual_bpm": 63.7
+  },
+  {
+    "timestamp": 1771324726.3025026,
+    "duration_s": 38.42,
+    "guessed_count": 10,
+    "actual_beats": 1,
+    "guessed_bpm": 15.6,
+    "actual_bpm": 1.6
   }
 ]
