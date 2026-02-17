@@ -30,6 +30,9 @@ from src.gui.rapid_change_game import RapidChangeWidget
 from src.gui.led_ball import LEDBallController
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
+from src.ble.genki_manager import GenkiWaveManager
+from src.gui.genki_bar import GenkiWaveBar
+from src.gui.genki_charts import GenkiGyroChart, GenkiAccChart, GenkiGyroSumChart
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +99,7 @@ class UIManager:
 
         # Database
         self.db = DatabaseManager("hrv_data.db")
-        self.current_user_id: Optional[int] = None
         self.current_session_id: Optional[int] = None
-        self.users: List[Dict[str, Any]] = []
 
         # Configuration
         self.config = ProcessingConfig(
@@ -125,6 +126,13 @@ class UIManager:
         # Rapid Change game widget
         self.rapid_change_game = RapidChangeWidget()
 
+        # Genki Wave manager + bar + charts
+        self.genki_manager = GenkiWaveManager()
+        self.genki_bar = GenkiWaveBar(self.genki_manager)
+        self.genki_gyro_chart = GenkiGyroChart()
+        self.genki_acc_chart = GenkiAccChart()
+        self.genki_gyro_sum_chart = GenkiGyroSumChart()
+
         # UI Element Tags
         self.window_tag = "Primary Window"
         self.assessment_status_tag = "Assessment Status"
@@ -134,12 +142,14 @@ class UIManager:
         dpg.create_viewport(title="Polar H10 HRVB", width=1280, height=900)
         dpg.setup_dearpygui()
 
-        self._load_users()
-
         with dpg.window(tag=self.window_tag, label="HRV Biofeedback", no_title_bar=True):
 
-            # --- Top Bar ---
+            # --- Polar H10 Top Bar ---
             self._build_top_bar()
+            dpg.add_separator()
+
+            # --- Genki Wave Top Bar ---
+            self.genki_bar.build()
             dpg.add_separator()
 
             # --- Main Layout ---
@@ -215,9 +225,9 @@ class UIManager:
                         dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
 
                         with dpg.group(tag="genki_wave_graphs_container"):
-                            dpg.add_text("No graphs configured yet.",
-                                         color=(150, 150, 150),
-                                         tag="genki_wave_placeholder")
+                            self.genki_gyro_chart.build("genki_wave_graphs_container")
+                            self.genki_acc_chart.build("genki_wave_graphs_container")
+                            self.genki_gyro_sum_chart.build("genki_wave_graphs_container")
 
                 with dpg.theme(tag="theme_graphs_header"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
@@ -230,25 +240,13 @@ class UIManager:
 
     def _build_top_bar(self):
         with dpg.group(horizontal=True):
-            dpg.add_text("Polar Flow-Sync", color=(0, 191, 255))
+            dpg.add_text("Polar H10", color=(0, 191, 255))
             dpg.add_spacer(width=20)
             dpg.add_text("Status: ")
             dpg.add_text("Disconnected", tag="status_text", color=(255, 0, 0))
             dpg.add_spacer(width=20)
             dpg.add_text("Battery: ")
             dpg.add_text("N/A", tag="battery_text")
-            dpg.add_spacer(width=20)
-            dpg.add_text("Mode: ")
-            dpg.add_text("--", tag="mode_text", color=(150, 150, 150))
-
-            dpg.add_spacer(width=50)
-            dpg.add_combo(
-                items=[u['username'] for u in self.users],
-                tag="user_combo", width=200,
-                callback=self._on_user_selected,
-                default_value="Select User"
-            )
-            dpg.add_button(label="+", callback=self.create_user_management_window, width=30)
 
             dpg.add_spacer(width=20)
             dpg.add_button(label="Connect", tag="connect_btn",
@@ -372,10 +370,7 @@ class UIManager:
         threading.Thread(target=self.process_incoming_data, daemon=True).start()
 
         if self.auto_connect:
-            logger.info("Auto-connecting to device (mode: none)...")
-            self.session_mode = SESSION_MODE_NONE
-            dpg.set_value("mode_text", "none")
-            dpg.configure_item("mode_text", color=(150, 150, 150))
+            logger.info("Auto-connecting to device...")
             try:
                 self.math_control_pipe.send(
                     IPCMessage(MSG_CMD_SET_SESSION_MODE,
@@ -389,9 +384,9 @@ class UIManager:
             self.update_assessment()
             self.poll_ble_status()
             self._update_heartbeat_blink()
+            self._poll_genki_wave()
 
             # Counting game tick (checks timer expiry each frame)
-            # if self.session_mode == SESSION_MODE_COUNTING:
             self.counting_game.tick()
             self.rapid_change_game.tick()
 
@@ -404,6 +399,7 @@ class UIManager:
         # Cleanup
         if self.audio_enabled:
             self.audio_feedback.stop()
+        self.genki_manager.shutdown()
         if self.shm:
             self.shm.close()
         dpg.destroy_context()
@@ -755,46 +751,7 @@ class UIManager:
         except Exception as e:
             logger.error(f"Failed to update pacer rate: {e}")
 
-    # --- User & Session Management ---
-
-    def _load_users(self):
-        try:
-            cursor = self.db.conn.cursor()
-            cursor.execute("SELECT user_id, username FROM users")
-            rows = cursor.fetchall()
-            self.users = [{'user_id': r[0], 'username': r[1]} for r in rows]
-        except Exception as e:
-            logger.error(f"Error loading users: {e}")
-            self.users = []
-
-    def _on_user_selected(self, sender, app_data):
-        username = app_data
-        for user in self.users:
-            if user['username'] == username:
-                self.current_user_id = user['user_id']
-                break
-
-    def create_user_management_window(self):
-        with dpg.window(label="User Management", modal=True, width=400, height=300):
-            dpg.add_text("Create New User")
-            dpg.add_input_text(label="Username", tag="new_username")
-            dpg.add_input_text(label="Email", tag="new_email")
-            dpg.add_button(label="Create", callback=self._create_user)
-
-    def _create_user(self):
-        username = dpg.get_value("new_username")
-        email = dpg.get_value("new_email")
-        if username:
-            try:
-                user_id = self.db.create_user(username, email)
-                self.current_user_id = user_id
-                self._load_users()
-                dpg.configure_item("user_combo",
-                                   items=[u['username'] for u in self.users])
-                dpg.set_value("user_combo", username)
-                dpg.delete_item(dpg.last_container())
-            except Exception as e:
-                logger.error(f"Error creating user: {e}")
+    # --- Session Management ---
 
     def handle_connect_button(self):
         if not self.is_connected:
@@ -808,9 +765,7 @@ class UIManager:
 
     def handle_session_toggle(self):
         if not self.is_recording:
-            if self.current_user_id is None:
-                return
-            self.current_session_id = self.db.create_session(self.current_user_id)
+            self.current_session_id = self.db.create_session(user_id=0)
             self.is_recording = True
             dpg.configure_item("session_btn", label="Stop Session")
         else:
@@ -910,24 +865,35 @@ class UIManager:
         except Exception as e:
             logger.error(f"Error receiving BLE status: {e}")
 
+    # --- Genki Wave Polling ---
+
+    def _poll_genki_wave(self):
+        """Poll the Genki Wave manager for status and data each frame."""
+        self.genki_bar.poll_status()
+
+        samples = self.genki_manager.poll()
+        if samples:
+            self.genki_gyro_chart.add_samples(samples)
+            self.genki_gyro_chart.update_plot()
+            self.genki_acc_chart.add_samples(samples)
+            self.genki_acc_chart.update_plot()
+            self.genki_gyro_sum_chart.add_samples(samples)
+            self.genki_gyro_sum_chart.update_plot()
+
     # --- Presets ---
 
     def handle_save_preset(self):
-        if self.current_user_id is None:
-            return
         preset_name = dpg.get_value("preset_name_input")
         if not preset_name:
             return
         try:
-            self.db.save_preset(self.current_user_id, preset_name, self.config)
+            self.db.save_preset(user_id=0, preset_name=preset_name, config=self.config)
         except Exception as e:
             logger.error(f"Error saving preset: {e}")
 
     def create_load_preset_window(self):
-        if self.current_user_id is None:
-            return
         try:
-            presets = self.db.get_user_presets(self.current_user_id)
+            presets = self.db.get_user_presets(user_id=0)
             if dpg.does_item_exist("load_preset_window"):
                 dpg.delete_item("load_preset_window")
             with dpg.window(label="Load Preset", modal=True, width=300, height=200,
@@ -948,7 +914,7 @@ class UIManager:
     def _on_preset_selected(self, sender, app_data, user_data):
         preset_name = user_data
         try:
-            config = self.db.load_preset(self.current_user_id, preset_name)
+            config = self.db.load_preset(user_id=0, preset_name=preset_name)
             if config:
                 self.config = config
                 self.math_control_pipe.send(self.config)
@@ -959,10 +925,8 @@ class UIManager:
     # --- History ---
 
     def create_history_window(self):
-        if self.current_user_id is None:
-            return
         try:
-            history = self.db.get_session_history(self.current_user_id, limit=20)
+            history = self.db.get_session_history(user_id=0, limit=20)
             if dpg.does_item_exist("history_window"):
                 dpg.delete_item("history_window")
             with dpg.window(label="Session History", width=600, height=400,
