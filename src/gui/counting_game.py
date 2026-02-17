@@ -129,7 +129,7 @@ class CountingGameWidget:
       - Scatter chart of guessed BPM vs actual BPM per round
     """
 
-    TAG_GROUP = "counting_game_group"
+    TAG_NODE = "counting_game_node"
     TAG_BTN = "counting_game_btn"
     TAG_INPUT = "counting_game_input"
     TAG_SUBMIT = "counting_game_submit"
@@ -151,7 +151,8 @@ class CountingGameWidget:
         if self._built:
             return
 
-        with dpg.group(parent=parent, tag=self.TAG_GROUP):
+        with dpg.tree_node(label="Heartbeat Counting", parent=parent,
+                           tag=self.TAG_NODE, default_open=True):
             dpg.add_text("Heartbeat Counting Game", color=(100, 180, 255))
             dpg.add_separator()
 
@@ -188,8 +189,8 @@ class CountingGameWidget:
 
     def destroy(self) -> None:
         """Remove the widget from the UI."""
-        if self._built and dpg.does_item_exist(self.TAG_GROUP):
-            dpg.delete_item(self.TAG_GROUP)
+        if self._built and dpg.does_item_exist(self.TAG_NODE):
+            dpg.delete_item(self.TAG_NODE)
         self._built = False
 
     @property

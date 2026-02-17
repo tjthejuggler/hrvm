@@ -26,6 +26,7 @@ from src.gui.charts import (
     ACCChart, ECGChart
 )
 from src.gui.counting_game import CountingGameWidget
+from src.gui.rapid_change_game import RapidChangeWidget
 from src.gui.led_ball import LEDBallController
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
@@ -120,6 +121,9 @@ class UIManager:
         # Counting game widget (shown only in counting mode)
         self.counting_game = CountingGameWidget()
 
+        # Rapid Change game widget
+        self.rapid_change_game = RapidChangeWidget()
+
         # UI Element Tags
         self.window_tag = "Primary Window"
         self.assessment_status_tag = "Assessment Status"
@@ -165,6 +169,7 @@ class UIManager:
                     # We create a container (group) for apps so they have a consistent parent
                     with dpg.group(tag="apps_container"):
                         self.counting_game.build("apps_container")
+                        self.rapid_change_game.build("apps_container")
 
                 # --- Graphs Section ---
                 with dpg.theme(tag="graphs_header_theme"):
@@ -364,6 +369,7 @@ class UIManager:
             # Counting game tick (checks timer expiry each frame)
             # if self.session_mode == SESSION_MODE_COUNTING:
             self.counting_game.tick()
+            self.rapid_change_game.tick()
 
             # Update Pacer Visuals
             if self.pacer_active:
@@ -424,6 +430,9 @@ class UIManager:
             dpg.set_value("hr_display", f"{hr_val:.1f} BPM")
             if self.audio_enabled:
                 self.audio_feedback.update_hr(hr_val)
+
+            # Feed HR to rapid change game
+            self.rapid_change_game.feed_hr(hr_val)
 
             # Biofeedback chart
             self.biofeedback_chart.hr_x.append(current_time)
@@ -486,6 +495,10 @@ class UIManager:
                 dpg.set_value("hr_display", f"{hr_val:.1f} BPM")
                 if self.audio_enabled:
                     self.audio_feedback.update_hr(hr_val)
+                
+                # Feed HR to rapid change game
+                self.rapid_change_game.feed_hr(hr_val)
+
                 self.biofeedback_chart.hr_x.append(current_time)
                 self.biofeedback_chart.hr_y.append(hr_val)
                 dpg.set_value("hr_series", [
