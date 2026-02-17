@@ -13,10 +13,10 @@ from src.utils.ipc import (
     MSG_HEARTBEAT_BLINK,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
-    MSG_CMD_SET_SESSION_MODE,
+    MSG_CMD_SET_SESSION_MODE, MSG_CMD_START_RECORDING, MSG_CMD_STOP_RECORDING,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
     KEY_IS_ARTIFACT, KEY_PACER_BPM, KEY_ASSESSMENT_TAG, KEY_OPTIMAL_BPM,
-    KEY_SESSION_MODE, SESSION_MODE_CHESS, SESSION_MODE_COUNTING, SESSION_MODE_NONE,
+    KEY_SESSION_MODE, SESSION_MODE_COUNTING, SESSION_MODE_NONE,
     ProcessedData, ProcessingConfig, SystemCommand, CommandType
 )
 from src.processing.math_utils import (
@@ -80,7 +80,7 @@ class SignalProcessor:
         # Session Recorder (conditionally started based on session mode)
         self.session_recorder = SessionRecorder()
         self._recorder_started = False
-        self.session_mode = SESSION_MODE_NONE  # Default: no recording
+        self.session_mode = SESSION_MODE_NONE
 
     def _design_bandpass(self) -> Tuple[np.ndarray, np.ndarray]:
         nyquist = 0.5 * self.sample_rate
@@ -151,11 +151,11 @@ class SignalProcessor:
             logger.error(f"Failed to forward ACC batch: {e}")
                 
     def _start_session_recording(self):
-        """Start the session recorder on first HR data (only in chess mode)."""
-        if not self._recorder_started and self.session_mode == SESSION_MODE_CHESS:
+        """Start the session recorder."""
+        if not self._recorder_started:
             self.session_recorder.start()
             self._recorder_started = True
-            logger.info("Session recording auto-started on first HR data (chess mode).")
+            logger.info("Session recording started.")
 
     def _stop_session_recording(self):
         """Stop the session recorder and write JSON file."""
@@ -172,9 +172,6 @@ class SignalProcessor:
         timestamp = batch.timestamp_unix
         hr_bpm = batch.heart_rate_bpm
         rr_intervals = batch.rr_intervals_ms
-
-        # Auto-start session recording on first HR data (chess mode only)
-        self._start_session_recording()
 
         # Feed data to session recorder (only if recording is active)
         if self._recorder_started and self.session_recorder.is_recording:
@@ -319,6 +316,12 @@ class SignalProcessor:
             new_mode = message.payload.get(KEY_SESSION_MODE, SESSION_MODE_NONE)
             self.session_mode = new_mode
             logger.info(f"Session mode set to: {self.session_mode}")
+
+        elif message.type == MSG_CMD_START_RECORDING:
+            self._start_session_recording()
+
+        elif message.type == MSG_CMD_STOP_RECORDING:
+            self._stop_session_recording()
 
     def handle_data_update(self, payload: Dict[str, Any]):
         rr_ms = payload.get('rr_ms')
