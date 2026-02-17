@@ -62,7 +62,8 @@ class UIManager:
         self.current_coherence = 0.0
         self.pacer_rate = 6.0
         self.start_time = time.time()
-        self.is_connected = False
+        self.is_connected = False  # Polar H10 connection state
+        self.is_genki_connected = False  # Genki Wave connection state
         self.is_recording = False
         self.is_json_recording = False # New flag for JSON recording
         # self.session_mode = None  # Removed session mode
@@ -180,20 +181,43 @@ class UIManager:
                         dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
                         dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10) # Increase size
 
+                # Device subsection theme (slightly different shade for nesting)
+                with dpg.theme(tag="device_subsection_theme"):
+                    with dpg.theme_component(dpg.mvCollapsingHeader):
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 80, 160, 80))
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (10, 100, 180, 120))
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (20, 120, 200, 160))
+                        dpg.add_theme_color(dpg.mvThemeCol_Text, (200, 230, 255, 255))
+                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 8, 8)
+
                 with dpg.collapsing_header(label="GRAPHS", tag="header_graphs", default_open=True):
                     dpg.bind_item_theme(dpg.last_item(), "graphs_header_theme")
-                    
-                    # We create a container (group) for graphs so they have a consistent parent
-                    with dpg.group(tag="graphs_container"):
-                        self.biofeedback_chart.build("graphs_container")
-                        self.heartbeat_chart.build("graphs_container")
-                        self.acc_chart.build("graphs_container")
-                        self.ecg_chart.build("graphs_container")
-                        self.tachogram_chart.build("graphs_container")
-                        self.poincare_chart.build("graphs_container")
-                        self.rmssd_chart.build("graphs_container")
-                        self.sdnn_chart.build("graphs_container")
-                        self.coherence_chart.build("graphs_container")
+
+                    # --- Polar H10 Device Subsection ---
+                    with dpg.collapsing_header(label="Polar H10", tag="header_polar_h10",
+                                               default_open=True, show=False):
+                        dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
+
+                        with dpg.group(tag="polar_h10_graphs_container"):
+                            self.biofeedback_chart.build("polar_h10_graphs_container")
+                            self.heartbeat_chart.build("polar_h10_graphs_container")
+                            self.acc_chart.build("polar_h10_graphs_container")
+                            self.ecg_chart.build("polar_h10_graphs_container")
+                            self.tachogram_chart.build("polar_h10_graphs_container")
+                            self.poincare_chart.build("polar_h10_graphs_container")
+                            self.rmssd_chart.build("polar_h10_graphs_container")
+                            self.sdnn_chart.build("polar_h10_graphs_container")
+                            self.coherence_chart.build("polar_h10_graphs_container")
+
+                    # --- Genki Wave Device Subsection ---
+                    with dpg.collapsing_header(label="Genki Wave", tag="header_genki_wave",
+                                               default_open=True, show=False):
+                        dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
+
+                        with dpg.group(tag="genki_wave_graphs_container"):
+                            dpg.add_text("No graphs configured yet.",
+                                         color=(150, 150, 150),
+                                         tag="genki_wave_placeholder")
 
                 with dpg.theme(tag="theme_graphs_header"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
@@ -859,6 +883,8 @@ class UIManager:
                             dpg.configure_item("status_text", color=(0, 255, 0))
                             dpg.configure_item("connect_btn", label="Disconnect")
                             dpg.configure_item("session_btn", show=True)
+                            # Show Polar H10 graphs subsection
+                            dpg.configure_item("header_polar_h10", show=True)
                         elif status == "disconnected":
                             self.is_connected = False
                             dpg.set_value("status_text", "Disconnected")
@@ -866,6 +892,8 @@ class UIManager:
                             dpg.configure_item("connect_btn", label="Connect")
                             dpg.configure_item("session_btn", show=False)
                             self.is_recording = False
+                            # Hide Polar H10 graphs subsection
+                            dpg.configure_item("header_polar_h10", show=False)
                         elif status == "reconnecting":
                             # Auto-reconnect in progress — keep session alive,
                             # show yellow status, keep Disconnect button available
@@ -876,6 +904,7 @@ class UIManager:
                             # Don't hide session_btn or reset is_recording —
                             # the session recorder keeps accumulating data and
                             # will resume when the device reconnects.
+                            # Keep Polar H10 graphs visible during reconnect
                     if "battery" in msg:
                         dpg.set_value("battery_text", f"{msg['battery']}%")
         except Exception as e:
