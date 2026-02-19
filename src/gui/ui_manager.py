@@ -27,6 +27,7 @@ from src.gui.charts import (
 )
 from src.gui.counting_game import CountingGameWidget
 from src.gui.rapid_change_game import RapidChangeWidget
+from src.gui.resonance_breathing import ResonanceBreathingWidget
 from src.gui.led_ball import LEDBallController
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
@@ -99,9 +100,9 @@ class UIManager:
             ("STEP_5", 2.0, 4.5),
         ]
 
-        # Pacer Engine
+        # Pacer Engine (kept for assessment protocol only)
         self.pacer = PacerEngine()
-        self.pacer_active = True
+        self.pacer_active = False  # no longer auto-running in top bar
 
         # Database
         self.db = DatabaseManager("hrv_data.db")
@@ -132,6 +133,9 @@ class UIManager:
         # Rapid Change game widget
         self.rapid_change_game = RapidChangeWidget()
 
+        # Resonance Breathing app
+        self.resonance_breathing = ResonanceBreathingWidget(db=self.db)
+
         # Genki Wave manager + bar + charts
         self.genki_manager = GenkiWaveManager()
         self.genki_bar = GenkiWaveBar(self.genki_manager)
@@ -157,6 +161,14 @@ class UIManager:
         dpg.create_viewport(title="Polar H10 HRVB", width=1280, height=900)
         dpg.setup_dearpygui()
 
+        # Load a larger font for metric value displays
+        with dpg.font_registry():
+            dpg.add_font(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                size=28,
+                tag="large_font"
+            )
+
         with dpg.window(tag=self.window_tag, label="HRV Biofeedback", no_title_bar=True):
 
             # --- Polar H10 Top Bar ---
@@ -172,9 +184,8 @@ class UIManager:
             dpg.add_separator()
 
             # --- Main Layout ---
-            with dpg.group(horizontal=True, height=350):
+            with dpg.group(horizontal=True, height=200):
                 self._build_left_panel()
-                self._build_center_panel()
                 self._build_right_panel()
 
             dpg.add_separator()
@@ -200,6 +211,7 @@ class UIManager:
                     with dpg.group(tag="apps_container"):
                         self.counting_game.build("apps_container")
                         self.rapid_change_game.build("apps_container")
+                        self.resonance_breathing.build("apps_container")
 
                 # --- Graphs Section ---
                 with dpg.theme(tag="graphs_header_theme"):
@@ -300,39 +312,39 @@ class UIManager:
             dpg.add_button(label="Set Rec Folder", callback=self.select_recording_folder, width=100)
 
     def _build_left_panel(self):
-        with dpg.child_window(width=250, height=-1, border=True):
-            dpg.add_text("Pacer Settings")
-            dpg.add_slider_float(
-                label="Breathing Rate (BPM)", default_value=6.0,
-                min_value=4.0, max_value=10.0,
-                callback=self.update_pacer_rate, tag="pacer_slider"
-            )
+        with dpg.child_window(width=280, height=-1, border=True):
+            dpg.add_text("Session Metrics", color=(0, 255, 255))
+            dpg.add_separator()
+
+            # Heart Rate — large
+            dpg.add_text("HEART RATE", color=(150, 150, 150))
+            with dpg.group(horizontal=True):
+                dpg.add_text("0 BPM", tag="hr_display", color=(255, 80, 80))
+                dpg.bind_item_font("hr_display", "large_font")
+                dpg.add_spacer(width=8)
+                with dpg.drawlist(width=24, height=24, tag="hb_blink_drawlist"):
+                    dpg.draw_circle(center=(12, 12), radius=9,
+                                    color=(255, 255, 255, 255),
+                                    fill=(0, 0, 0, 255),
+                                    tag="hb_blink_circle")
+            dpg.add_spacer(height=8)
+
+            # RMSSD — large
+            dpg.add_text("RMSSD", color=(150, 150, 150))
+            dpg.add_text("0 ms", tag="rmssd_display", color=(0, 255, 0))
+            dpg.bind_item_font("rmssd_display", "large_font")
+            dpg.add_spacer(height=8)
+
+            # SDNN — large
+            dpg.add_text("SDNN", color=(150, 150, 150))
+            dpg.add_text("0 ms", tag="sdnn_display", color=(255, 255, 0))
+            dpg.bind_item_font("sdnn_display", "large_font")
+            dpg.add_spacer(height=8)
+
+            dpg.add_text("Signal Quality", color=(150, 150, 150))
+            dpg.add_progress_bar(tag="quality_bar", default_value=0.0, width=-1)
 
             dpg.add_spacer(height=10)
-            dpg.add_text("Breathing Cycle (s)")
-            dpg.add_input_float(label="Inhale", default_value=4.0, step=0.5,
-                                width=100, callback=self.update_pacer_settings,
-                                tag="pacer_inhale")
-            dpg.add_input_float(label="Hold (Full)", default_value=4.0, step=0.5,
-                                width=100, callback=self.update_pacer_settings,
-                                tag="pacer_hold_full")
-            dpg.add_input_float(label="Exhale", default_value=4.0, step=0.5,
-                                width=100, callback=self.update_pacer_settings,
-                                tag="pacer_exhale")
-            dpg.add_input_float(label="Hold (Empty)", default_value=4.0, step=0.5,
-                                width=100, callback=self.update_pacer_settings,
-                                tag="pacer_hold_empty")
-
-            dpg.add_spacer(height=20)
-            dpg.add_separator()
-            dpg.add_text("Resonance Assessment")
-            dpg.add_button(label="Start Assessment",
-                           callback=self.start_assessment_protocol)
-            dpg.add_text("Status: Idle", tag=self.assessment_status_tag)
-            dpg.add_progress_bar(tag="assessment_progress", default_value=0.0,
-                                 width=-1, show=False)
-
-            dpg.add_spacer(height=20)
             dpg.add_separator()
             dpg.add_text("Presets")
             dpg.add_input_text(tag="preset_name_input", width=150, hint="Preset Name")
@@ -341,7 +353,7 @@ class UIManager:
                 dpg.add_button(label="Load", callback=self.create_load_preset_window,
                                width=70)
 
-            dpg.add_spacer(height=20)
+            dpg.add_spacer(height=10)
             dpg.add_separator()
             dpg.add_text("LED Ball")
             dpg.add_checkbox(label="Enable LED Ball", tag="led_ball_checkbox",
@@ -351,45 +363,9 @@ class UIManager:
                                callback=self._update_led_ball_ip,
                                on_enter=True)
 
-    def _build_center_panel(self):
-        with dpg.child_window(width=-300, height=-1, border=False):
-            with dpg.group(horizontal=True):
-                dpg.add_spacer(width=50)
-                with dpg.group():
-                    dpg.add_text("COHERENCE", color=(150, 150, 150))
-                    dpg.add_text("0.0", tag="coherence_display", color=(0, 255, 0))
-                dpg.add_spacer(width=100)
-                with dpg.group():
-                    dpg.add_text("HEART RATE", color=(150, 150, 150))
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("0 BPM", tag="hr_display", color=(255, 50, 50))
-                        dpg.add_spacer(width=10)
-                        # Heartbeat blink indicator (small circle)
-                        with dpg.drawlist(width=20, height=20, tag="hb_blink_drawlist"):
-                            dpg.draw_circle(center=(10, 10), radius=8,
-                                            color=(255, 255, 255, 255),
-                                            fill=(0, 0, 0, 255),
-                                            tag="hb_blink_circle")
-
-            dpg.add_spacer(height=10)
-
-            # Pacer Visuals (Circle)
-            with dpg.drawlist(width=600, height=300, tag="pacer_drawlist"):
-                self.pacer.setup_draw_layer("pacer_drawlist")
-
     def _build_right_panel(self):
-        with dpg.child_window(width=-1, height=-1, border=True):
-            dpg.add_text("Session Metrics", color=(0, 255, 255))
-            dpg.add_separator()
-            with dpg.group(horizontal=True):
-                dpg.add_text("RMSSD:")
-                dpg.add_text("0 ms", tag="rmssd_display", color=(0, 255, 0))
-            with dpg.group(horizontal=True):
-                dpg.add_text("SDNN:")
-                dpg.add_text("0 ms", tag="sdnn_display", color=(255, 255, 0))
-            dpg.add_spacer(height=10)
-            dpg.add_text("Signal Quality")
-            dpg.add_progress_bar(tag="quality_bar", default_value=0.0, width=-1)
+        # Right panel removed — metrics are now in the left panel
+        pass
 
     # --- Main Loop ---
 
@@ -411,20 +387,16 @@ class UIManager:
             self.start_stream()
 
         while dpg.is_dearpygui_running() and self.running:
-            self.update_pacer()
             self.update_assessment()
             self.poll_ble_status()
             self._update_heartbeat_blink()
             self._poll_genki_wave()
             self._poll_pvs()
 
-            # Counting game tick (checks timer expiry each frame)
+            # App ticks
             self.counting_game.tick()
             self.rapid_change_game.tick()
-
-            # Update Pacer Visuals
-            if self.pacer_active:
-                self.pacer.update(600, 300)
+            self.resonance_breathing.tick()
 
             dpg.render_dearpygui_frame()
 
@@ -504,9 +476,9 @@ class UIManager:
         dpg.set_value("sdnn_display", f"{data.hrv_sdnn:.1f} ms")
         dpg.set_value("quality_bar", data.quality_score)
 
-        # Coherence
+        # Coherence — forwarded to the Resonance Breathing app display
         self.current_coherence = data.coherence_score
-        dpg.set_value("coherence_display", f"{self.current_coherence:.1f}")
+        self.resonance_breathing.update_resonance_score(self.current_coherence)
 
         # Metrics history
         self.rmssd_chart.add_data(current_time, self.current_rmssd)
@@ -568,7 +540,7 @@ class UIManager:
 
         if KEY_COHERENCE in payload:
             self.current_coherence = payload[KEY_COHERENCE]
-            dpg.set_value("coherence_display", f"{self.current_coherence:.1f}")
+            self.resonance_breathing.update_resonance_score(self.current_coherence)
 
         # Metrics history
         self.rmssd_chart.add_data(current_time, self.current_rmssd)
@@ -637,20 +609,6 @@ class UIManager:
             # Resting state: black fill
             dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
 
-    # --- Pacer ---
-
-    def update_pacer(self):
-        current_time = time.time() - self.start_time
-        if len(self.biofeedback_chart.hr_x) > 0:
-            center_hr = 70.0
-            if len(self.biofeedback_chart.hr_y) > 10:
-                center_hr = np.mean(self.biofeedback_chart.hr_y)
-            amplitude = 10.0
-            t = np.linspace(max(0, current_time - 60), current_time + 5, 200)
-            freq = self.pacer_rate / 60.0
-            y = center_hr + amplitude * np.sin(2 * np.pi * freq * t)
-            dpg.set_value("pacer_series", [list(t), list(y)])
-
     # --- BLE Control ---
 
     def start_stream(self):
@@ -682,32 +640,6 @@ class UIManager:
             self.led_ball.set_ip(ip)
             logger.info(f"LED ball IP set to {ip}")
 
-    def update_pacer_rate(self, sender, app_data):
-        self.pacer_rate = app_data
-        try:
-            self.math_control_pipe.send(
-                IPCMessage(MSG_CMD_SET_PACER_TARGET, {KEY_PACER_BPM: self.pacer_rate}))
-            cycle_duration = 60.0 / self.pacer_rate
-            part = cycle_duration / 2.0
-            self.pacer.set_timing(part, 0, part, 0)
-        except Exception as e:
-            logger.error(f"Failed to update pacer rate: {e}")
-
-    def update_pacer_settings(self, sender, app_data):
-        inhale = dpg.get_value("pacer_inhale")
-        hold_full = dpg.get_value("pacer_hold_full")
-        exhale = dpg.get_value("pacer_exhale")
-        hold_empty = dpg.get_value("pacer_hold_empty")
-        self.pacer.set_timing(inhale, hold_full, exhale, hold_empty)
-        bpm = self.pacer.get_bpm()
-        self.pacer_rate = bpm
-        dpg.set_value("pacer_slider", bpm)
-        try:
-            self.math_control_pipe.send(
-                IPCMessage(MSG_CMD_SET_PACER_TARGET, {KEY_PACER_BPM: bpm}))
-        except Exception as e:
-            logger.error(f"Failed to update pacer rate: {e}")
-
     # --- Assessment Protocol ---
 
     def start_assessment_protocol(self):
@@ -731,7 +663,6 @@ class UIManager:
                       f"Step: {step_name} ({duration_min} min)")
         if bpm > 0:
             self.pacer_rate = bpm
-            dpg.set_value("pacer_slider", bpm)
             cycle = 60.0 / bpm
             self.pacer.set_timing(cycle / 2, 0, cycle / 2, 0)
             try:
@@ -775,7 +706,6 @@ class UIManager:
         dpg.set_value(self.assessment_status_tag,
                       f"Assessment Complete. Optimal BPM: {optimal_bpm}")
         self.pacer_rate = optimal_bpm
-        dpg.set_value("pacer_slider", optimal_bpm)
         cycle = 60.0 / optimal_bpm
         self.pacer.set_timing(cycle / 2, 0, cycle / 2, 0)
         try:

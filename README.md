@@ -7,6 +7,7 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 - **Real-Time HR & HRV:** Streams heart rate and RR intervals via the standard BLE Heart Rate Measurement characteristic, calculates RMSSD/SDNN in real-time.
 - **BLE Auto-Reconnect:** Automatically reconnects to the Polar H10 if the Bluetooth connection drops unexpectedly (e.g., walking out of range). Uses exponential backoff (2s → 4s → 8s → ... up to 30s max). All previously active streams (HR, ACC, ECG) are re-enabled on reconnect. Session recording is preserved across disconnects — no data loss. The GUI shows an orange "Reconnecting..." status during attempts. Clicking "Disconnect" during reconnect cancels the auto-reconnect.
 - **Session Mode Selection:** When clicking "Connect", a modal popup asks the user to choose a session mode: **Chess**, **Counting**, or **None**. The selected mode is displayed in the top bar and sent to the signal processor via IPC. Only "Chess" mode enables JSON session recording; "Counting" mode shows the Heartbeat Counting Game; "None" shows the standard dashboard. Auto-connect (`--auto-connect`) defaults to "None" mode.
+- **Resonance Breathing App:** A self-contained breathing pacer app in the APPS section. Provides manual timing inputs (Inhale / Hold Full / Exhale / Hold Empty in seconds), a live cycle-duration and BPM readout, a **Start/Stop** button that drives an animated breathing circle (expanding/contracting with colour-coded phases), and a **Session History** bar chart showing the resonance score achieved in each past session. Sessions are persisted to the SQLite database (`breathing_sessions` table). The resonance score is fed from the live coherence metric while a session is active.
 - **Heartbeat Counting Game (Counting Mode):** An interoception training game that appears at the top of the charts section when "Counting" mode is selected. The user clicks "Start" and tries to silently count their own heartbeats. After a random interval (20–80 seconds, hidden from the user), the button changes to "Stop" and an input field becomes active. The user enters their guessed heartbeat count and clicks "Submit". The system calculates the actual BPM from RR intervals collected during the game period and extrapolates the guessed BPM from the user's count. Results are persisted to `counting_game_data.json` and displayed on a scatter chart showing guessed BPM vs actual BPM for each round.
 - **Chess-Coach Session Recording:** Records HR sessions to JSON files for integration with the chess-coach analytics web app (only when "Chess" mode is selected). Files are saved to `~/Projects/chess-coach/data/hr_sessions/` in format v1.0 with 1Hz HR, raw RR intervals, and 5s-window RMSSD/SDNN (with artifact rejection). Recording auto-starts on first HR data and auto-stops on shutdown.
 - **Heartbeat Blink Indicator:** A small circle next to the HR display that flashes red on each detected heartbeat (via ECG R-wave detection) and fades back to black within 150ms. Uses a fast visual-only path from the ECG stream (~100-150ms latency) while keeping the standard HR service for accurate metrics.
@@ -14,7 +15,6 @@ A high-performance, multi-process Python application for real-time Heart Rate Va
 - **Heartbeat Chart:** Individual heartbeats displayed as a stem plot with RR intervals (ms) and timing for each beat.
 - **Accelerometer (IMU) Chart:** Real-time 3-axis accelerometer data from the Polar H10 PMD service (25 Hz default).
 - **ECG Waveform Chart:** Real-time ECG waveform from the Polar H10 PMD service (130 Hz, 14-bit resolution). Displays a 5-second scrolling window of microvolt samples.
-- **RSA Visualization:** "Snake" graph overlaying interpolated Heart Rate on a breathing pacer.
 - **Coherence Score:** Real-time metric (0-100) indicating heart rate synchronization with breathing.
 - **Collapsible Charts:** All charts (Biofeedback, Heartbeats, Accelerometer, ECG, Tachogram, Poincaré, RMSSD History, SDNN History, Coherence History) are individually collapsible tree-node sections — no tabs. Each history chart is full-width.
 - **Resonance Frequency Assessment:** Automated protocol to find your optimal breathing rate.
@@ -63,10 +63,9 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
 
 ### Controls
 - **Connect/Disconnect:** Opens a session mode selection popup (Chess/Counting/None), then connects to the Polar H10 and begins data streaming. The selected mode is shown in the top bar.
-- **Pacer Settings:** Adjust the target breathing rate (BPM).
+- **Resonance Breathing App:** Found in the APPS section. Set inhale/hold/exhale/hold timings, then click **Start** to begin a guided breathing session with the animated circle. Click **Stop** to end the session and save it to history.
 - **Audio Feedback:** Toggle real-time heart rate sonification.
 - **LED Ball:** Enable/disable the external LED ball and set its IP address. The ball flashes red on each heartbeat when enabled.
-- **Resonance Assessment:** Click "Start Assessment" to begin the automated protocol (approx. 15 mins). Follow the on-screen pacer instructions.
 
 ## Polar Verity Sense Support
 
@@ -115,6 +114,7 @@ The PVS top bar includes toggle checkboxes: **ACC**, **GYR**, **MAG**, **PPI**. 
 - **`src/gui/led_ball.py`**: `LEDBallController` — drives an external LED ball over UDP using the ball's native protocol (8-byte header + `0x0a R G B` color command). Integrated with the heartbeat blink in `ui_manager.py`.
 - **`src/gui/charts.py`**: Collapsible chart widgets: BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart, RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart, ACCChart, ECGChart.
 - **`src/gui/counting_game.py`**: Heartbeat Counting Game module. Contains `CountingGameController` (state machine: idle → counting → input), `CountingGameWidget` (DearPyGui controls + scatter chart), and JSON persistence functions (`load_game_history`, `save_game_entry`). Data is stored in `counting_game_data.json`.
+- **`src/gui/resonance_breathing.py`**: Resonance Breathing App. `ResonanceBreathingWidget` provides manual timing inputs, a Start/Stop button, an animated `PacerEngine` breathing circle, and a session-history bar chart. Sessions are persisted via `DatabaseManager.save_breathing_session()` and loaded on startup via `get_breathing_sessions()`.
 - **`src/recording/`**: Session recording for chess-coach integration. `SessionRecorder` accumulates HR/RR data in memory and writes JSON files on session stop.
 - **`src/database/`**: SQLite storage for session data.
 - **`src/utils/ipc.py`**: IPC data classes (`HRBatch`, `ECGBatch`, `ACCBatch`, `ProcessedData`, `BLECommand`).
@@ -160,4 +160,4 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
-2026-02-19 11:51 CET — Fixed backwards-going timestamps on PVS ACC/GYR charts: replaced per-packet `time.time()` anchoring with device `timestamp_ns`-based timing (`_device_ts_to_wall()`). Each stream type gets one wall-clock anchor on its first packet; all subsequent packets use the device's own monotonic nanosecond clock, giving perfectly forward-only, evenly-spaced timestamps.
+2026-02-19 14:06 CET — Added **Resonance Breathing App** to the APPS section. Removed the breathing circle animation and pacer settings from the main top area. The new app provides manual timing inputs (inhale/hold/exhale/hold), a Start/Stop button, an animated breathing circle (PacerEngine), and a session-history bar chart showing resonance scores per session. Sessions are persisted to a new `breathing_sessions` table in the SQLite database.

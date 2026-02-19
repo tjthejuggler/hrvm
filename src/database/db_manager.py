@@ -122,6 +122,24 @@ class DatabaseManager:
         if 'exhale_hold_time' not in columns:
             cursor.execute("ALTER TABLE presets ADD COLUMN exhale_hold_time REAL")
 
+        # Breathing Sessions Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS breathing_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duration_s REAL,
+            resonance_score REAL,
+            inhale_time REAL,
+            hold_full_time REAL,
+            exhale_time REAL,
+            hold_empty_time REAL
+        );
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_breathing_sessions_ts "
+            "ON breathing_sessions(timestamp);"
+        )
+
         # HRV Data Table (Time-Series)
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS hrv_data (
@@ -290,6 +308,44 @@ class DatabaseManager:
             cursor.execute("SELECT id FROM presets WHERE user_id = ? AND name = ?", (user_id, name))
             row = cursor.fetchone()
             return row['id'] if row else -1
+
+    def save_breathing_session(
+        self,
+        duration_s: float,
+        resonance_score: float,
+        inhale: float = 4.0,
+        hold_full: float = 0.0,
+        exhale: float = 4.0,
+        hold_empty: float = 0.0,
+    ) -> int:
+        """Persist a completed resonance-breathing session."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO breathing_sessions
+                (duration_s, resonance_score, inhale_time, hold_full_time,
+                 exhale_time, hold_empty_time)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (duration_s, resonance_score, inhale, hold_full, exhale, hold_empty),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_breathing_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent breathing sessions, oldest-first."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM breathing_sessions
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def log_hrv_data(self, session_id: int, data: Union[ProcessedData, List[ProcessedData]]) -> None:
         """
