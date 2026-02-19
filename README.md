@@ -106,7 +106,7 @@ The PVS top bar includes toggle checkboxes: **ACC**, **GYR**, **MAG**, **PPI**. 
 
 ## Architecture
 - **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, D-Bus `StartNotify` for reliable PMD streaming, and automatic reconnection with exponential backoff on unexpected disconnects. Also manages the Polar Verity Sense via `pvs_manager.py` using SDK Mode.
-- **`src/ble/pvs_manager.py`**: `PolarVeritySenseManager` manages PVS BLE connection in a background thread. Supports two mutually exclusive modes: SDK Mode (ACC/GYR/MAG) and Normal Mode (PPI). Sends `SDK_MODE_DISABLE` before PPI start to clear stale device state.
+- **`src/ble/pvs_manager.py`**: `PolarVeritySenseManager` manages PVS BLE connection in a background thread. Supports two mutually exclusive modes: SDK Mode (ACC/GYR/MAG) and Normal Mode (PPI). Sends `SDK_MODE_DISABLE` before PPI start to clear stale device state. Uses the device's own `timestamp_ns` (from the PMD packet header) to compute per-sample timestamps via `_device_ts_to_wall()`, eliminating backwards-going timestamps caused by per-packet `time.time()` jitter when ACC and GYR packets arrive interleaved.
 - **`src/ble/pvs_parser.py`**: Parses raw PMD data packets for ACC, GYR, MAG, PPI. Supports both raw (0x00) and delta-compressed (0x80) frame types using bitmask `(frame_type & 0x80) == 0x80`. Provides `build_sdk_cmd()` for the proven SDK mode command format.
 - **`src/processing/`**: Signal processing (filtering, interpolation, FFT) using `numpy` and `scipy`. Handles `HRBatch`, `ECGBatch`, and forwards `ACCBatch` data.
 - **`src/gui/`**: User Interface using `Dear PyGui`. Charts are modular collapsible widgets in `charts.py`.
@@ -160,4 +160,4 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
-2026-02-19 11:47 CET — Removed PPG (unsupported on device firmware); fixed PPI INVALID_STATE by sending SDK_MODE_DISABLE before PPI start to clear stale device state.
+2026-02-19 11:51 CET — Fixed backwards-going timestamps on PVS ACC/GYR charts: replaced per-packet `time.time()` anchoring with device `timestamp_ns`-based timing (`_device_ts_to_wall()`). Each stream type gets one wall-clock anchor on its first packet; all subsequent packets use the device's own monotonic nanosecond clock, giving perfectly forward-only, evenly-spaced timestamps.

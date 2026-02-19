@@ -143,6 +143,10 @@ class PolarVeritySenseManager:
         # D-Bus agent state
         self._agent_registered = False
 
+        # Per-stream clock anchors: maps measurement_type -> (device_ns, wall_time)
+        # Used to convert device nanosecond timestamps to Unix epoch seconds.
+        self._clock_anchors: Dict[int, tuple] = {}
+
     @property
     def connected(self) -> bool:
         return self._connected
@@ -213,14 +217,31 @@ class PolarVeritySenseManager:
             self._samples.clear()
             return samples
 
+    def _device_ts_to_wall(self, meas_type: int, device_ns: int) -> float:
+        """Convert a device nanosecond timestamp to Unix epoch seconds.
+
+        The device provides a monotonic nanosecond counter. We anchor it to
+        wall-clock time on the first packet of each stream type, then use the
+        device's own clock for all subsequent packets. This gives perfectly
+        monotonic, evenly-spaced timestamps with no per-packet jitter.
+        """
+        if meas_type not in self._clock_anchors:
+            # First packet for this stream: anchor device_ns to now
+            self._clock_anchors[meas_type] = (device_ns, time.time())
+
+        anchor_ns, anchor_wall = self._clock_anchors[meas_type]
+        offset_s = (device_ns - anchor_ns) / 1e9
+        return anchor_wall + offset_s
+
     def _enqueue_samples(self, packet: PVSDataPacket):
         """Convert parsed packet to PVSSample objects and enqueue them.
 
-        Uses wall-clock time (time.time()) as the base for the last sample in
-        the packet, then reconstructs earlier sample times by subtracting
-        index * dt. This keeps all timestamps in Unix epoch space (compatible
-        with HR samples from the BLE HR service) while still giving each sample
-        its correct evenly-spaced timestamp.
+        Uses the device's own timestamp_ns (from the PMD packet header) to
+        compute sample times. The device timestamp marks the *last* sample in
+        the packet; earlier samples are reconstructed by subtracting index * dt.
+
+        This eliminates backwards-going timestamps caused by per-packet
+        time.time() jitter when ACC and GYR packets arrive interleaved.
         """
         # Sample rates for each stream type (Hz)
         _SAMPLE_RATES = {
@@ -228,16 +249,18 @@ class PolarVeritySenseManager:
             0x05: 52.0,   # GYR
             0x06: 50.0,   # MAG
         }
-        sample_rate = _SAMPLE_RATES.get(packet.measurement_type, 50.0)
+        meas_type = packet.measurement_type
+        sample_rate = _SAMPLE_RATES.get(meas_type, 50.0)
         dt = 1.0 / sample_rate
-        now = time.time()
+
+        # Convert device timestamp (ns) to wall-clock seconds for the last sample
+        last_sample_wall = self._device_ts_to_wall(meas_type, packet.timestamp_ns)
 
         with self._samples_lock:
             if packet.acc_samples:
                 n = len(packet.acc_samples)
-                # now = time of last sample; earlier samples go back by dt each
                 for i, s in enumerate(packet.acc_samples):
-                    t = now - (n - 1 - i) * dt
+                    t = last_sample_wall - (n - 1 - i) * dt
                     self._samples.append(PVSSample(
                         timestamp=t,
                         acc=(s.x, s.y, s.z),
@@ -246,7 +269,7 @@ class PolarVeritySenseManager:
             if packet.gyro_samples:
                 n = len(packet.gyro_samples)
                 for i, s in enumerate(packet.gyro_samples):
-                    t = now - (n - 1 - i) * dt
+                    t = last_sample_wall - (n - 1 - i) * dt
                     self._samples.append(PVSSample(
                         timestamp=t,
                         gyro=(s.x, s.y, s.z),
@@ -255,13 +278,14 @@ class PolarVeritySenseManager:
             if packet.mag_samples:
                 n = len(packet.mag_samples)
                 for i, s in enumerate(packet.mag_samples):
-                    t = now - (n - 1 - i) * dt
+                    t = last_sample_wall - (n - 1 - i) * dt
                     self._samples.append(PVSSample(
                         timestamp=t,
                         mag=(s.x, s.y, s.z),
                     ))
 
             if packet.ppi_samples:
+                now = time.time()
                 for s in packet.ppi_samples:
                     self._samples.append(PVSSample(
                         timestamp=now,
@@ -556,6 +580,8 @@ class PolarVeritySenseManager:
             self._set_status(False, f"Error: {exc}")
             logger.error(f"PVS error: {exc}", exc_info=True)
         finally:
+            # Clear clock anchors so a reconnect gets fresh per-stream anchors
+            self._clock_anchors.clear()
             self._set_status(False, "Disconnected")
 
     def _on_task_done(self, future):
