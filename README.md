@@ -68,10 +68,50 @@ On Linux, you need to install the Bluetooth development headers and ensure your 
 - **LED Ball:** Enable/disable the external LED ball and set its IP address. The ball flashes red on each heartbeat when enabled.
 - **Resonance Assessment:** Click "Start Assessment" to begin the automated protocol (approx. 15 mins). Follow the on-screen pacer instructions.
 
+## Polar Verity Sense Support
+
+The app supports the **Polar Verity Sense** optical HR sensor as a secondary device alongside the Polar H10.
+
+### Streams
+Two mutually exclusive modes — the device cannot run SDK mode and PPI simultaneously:
+
+**SDK Mode** (ACC + GYR + MAG + HR): enabled when any IMU stream is checked.
+
+| Stream | Type | Rate | Resolution | Range | Channels |
+|--------|------|------|-----------|-------|---------|
+| ACC    | 0x02 | 52 Hz | 16-bit | 8G | 3 (X,Y,Z) |
+| GYR    | 0x05 | 52 Hz | 16-bit | 2000 dps | 3 (X,Y,Z) |
+| MAG    | 0x06 | 50 Hz | 16-bit | 50G | 3 (X,Y,Z) |
+
+**Normal Mode** (PPI + HR): enabled only when all IMU streams are unchecked and PPI is checked.
+
+| Stream | Type | Notes |
+|--------|------|-------|
+| PPI    | 0x03 | Pulse-to-pulse interval (HRV) |
+
+**Hardware limitations confirmed:**
+- **PPG (0x15):** Returns `INVALID_MEASUREMENT_TYPE` on this device firmware — not supported. PPG streaming and charts have been removed.
+- **SDK mode vs PPI:** Mutually exclusive. The manager sends `SDK_MODE_DISABLE` before attempting PPI start to clear any stale device state from a previous session.
+- **HR in SDK mode:** BLE HR service returns 0 bpm because SDK mode disables the internal HR algorithm. HR is only available in Normal (PPI) mode.
+
+### UI Controls
+The PVS top bar includes toggle checkboxes: **ACC**, **GYR**, **MAG**, **PPI**. ACC/GYR/MAG default to enabled; PPI defaults to disabled. Toggles are disabled while connected.
+
+### Charts (PVS Graphs section)
+- **PVS Acc (mg):** 3-axis accelerometer, 20s scrolling window
+- **PVS Gyro (dps):** 3-axis gyroscope, 20s scrolling window
+- **PVS Mag (Gauss/10):** 3-axis magnetometer, 20s scrolling window
+- **PVS PPI (ms):** Pulse-to-pulse intervals as stem plot (Normal mode only)
+- **PVS Heart Rate (BPM):** HR from BLE HR service or PPI stream
+
 ## Architecture
-- **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, D-Bus `StartNotify` for reliable PMD streaming, and automatic reconnection with exponential backoff on unexpected disconnects.
+- **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, D-Bus `StartNotify` for reliable PMD streaming, and automatic reconnection with exponential backoff on unexpected disconnects. Also manages the Polar Verity Sense via `pvs_manager.py` using SDK Mode.
+- **`src/ble/pvs_manager.py`**: `PolarVeritySenseManager` manages PVS BLE connection in a background thread. Supports two mutually exclusive modes: SDK Mode (ACC/GYR/MAG) and Normal Mode (PPI). Sends `SDK_MODE_DISABLE` before PPI start to clear stale device state.
+- **`src/ble/pvs_parser.py`**: Parses raw PMD data packets for ACC, GYR, MAG, PPI. Supports both raw (0x00) and delta-compressed (0x80) frame types using bitmask `(frame_type & 0x80) == 0x80`. Provides `build_sdk_cmd()` for the proven SDK mode command format.
 - **`src/processing/`**: Signal processing (filtering, interpolation, FFT) using `numpy` and `scipy`. Handles `HRBatch`, `ECGBatch`, and forwards `ACCBatch` data.
 - **`src/gui/`**: User Interface using `Dear PyGui`. Charts are modular collapsible widgets in `charts.py`.
+- **`src/gui/pvs_bar.py`**: `PolarVeritySenseBar` PVS connection bar with stream toggles (ACC, GYR, MAG, PPI) and Connect/Disconnect button.
+- **`src/gui/pvs_charts.py`**: PVS chart widgets: `PVSAccChart`, `PVSGyroChart`, `PVSMagChart`, `PVSPPIChart`, `PVSHeartRateChart`.
 - **`src/gui/led_ball.py`**: `LEDBallController` — drives an external LED ball over UDP using the ball's native protocol (8-byte header + `0x0a R G B` color command). Integrated with the heartbeat blink in `ui_manager.py`.
 - **`src/gui/charts.py`**: Collapsible chart widgets: BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart, RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart, ACCChart, ECGChart.
 - **`src/gui/counting_game.py`**: Heartbeat Counting Game module. Contains `CountingGameController` (state machine: idle → counting → input), `CountingGameWidget` (DearPyGui controls + scatter chart), and JSON persistence functions (`load_game_history`, `save_game_entry`). Data is stored in `counting_game_data.json`.
@@ -120,4 +160,4 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
-2026-02-16 10:10 CET
+2026-02-19 11:47 CET — Removed PPG (unsupported on device firmware); fixed PPI INVALID_STATE by sending SDK_MODE_DISABLE before PPI start to clear stale device state.

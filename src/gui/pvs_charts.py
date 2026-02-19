@@ -4,11 +4,15 @@ Provides collapsible DearPyGui chart widgets for displaying real-time
 sensor data from the Polar Verity Sense:
   - Accelerometer (X, Y, Z) in mg
   - Gyroscope (X, Y, Z) in dps
+  - Magnetometer (X, Y, Z) in Gauss/10
   - PPI (Pulse-to-Pulse Interval) in ms
-  - PPI Heart Rate in BPM
+  - Heart Rate in BPM (from BLE HR service or PPI)
 
 Follows the same CollapsibleChart pattern used by the Polar H10 charts
 in src/gui/charts.py and the Genki Wave charts in src/gui/genki_charts.py.
+
+Note: PPG streaming is not supported on this device firmware
+(returns INVALID_MEASUREMENT_TYPE). PPG charts have been removed.
 """
 
 import dearpygui.dearpygui as dpg
@@ -139,6 +143,66 @@ class PVSGyroChart:
         dpg.fit_axis_data(f"{self.tag_prefix}_y_axis")
 
 
+class PVSMagChart:
+    """Magnetometer X/Y/Z time-series chart for the Polar Verity Sense."""
+
+    def __init__(self, buffer_size: int = 2000):
+        self.label = "PVS Mag (Gauss/10)"
+        self.tag_prefix = "pvs_mag"
+        self.buffer_size = buffer_size
+        self.ts: deque = deque(maxlen=buffer_size)
+        self.x: deque = deque(maxlen=buffer_size)
+        self.y: deque = deque(maxlen=buffer_size)
+        self.z: deque = deque(maxlen=buffer_size)
+        self._start_time: float = 0.0
+
+    def build(self, parent: str):
+        """Build the chart UI inside the given parent container."""
+        with dpg.tree_node(
+            label=self.label, parent=parent,
+            tag=f"{self.tag_prefix}_node", default_open=True
+        ):
+            with dpg.plot(label=self.label, height=200, width=-1,
+                          tag=f"{self.tag_prefix}_plot"):
+                dpg.add_plot_legend()
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)",
+                                  tag=f"{self.tag_prefix}_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="Gauss/10",
+                                   tag=f"{self.tag_prefix}_y_axis"):
+                    dpg.add_line_series([], [], label="X",
+                                        tag=f"{self.tag_prefix}_x_series")
+                    dpg.add_line_series([], [], label="Y",
+                                        tag=f"{self.tag_prefix}_y_series")
+                    dpg.add_line_series([], [], label="Z",
+                                        tag=f"{self.tag_prefix}_z_series")
+
+    def add_samples(self, samples: 'List[PVSSample]'):
+        """Add new MAG samples to the buffer."""
+        for s in samples:
+            if s.mag is None:
+                continue
+            if not self._start_time:
+                self._start_time = s.timestamp
+            t = s.timestamp - self._start_time
+            self.ts.append(t)
+            self.x.append(s.mag[0])
+            self.y.append(s.mag[1])
+            self.z.append(s.mag[2])
+
+    def update_plot(self):
+        """Push buffered data to the DearPyGui plot."""
+        if not self.ts:
+            return
+        t = list(self.ts)
+        dpg.set_value(f"{self.tag_prefix}_x_series", [t, list(self.x)])
+        dpg.set_value(f"{self.tag_prefix}_y_series", [t, list(self.y)])
+        dpg.set_value(f"{self.tag_prefix}_z_series", [t, list(self.z)])
+        latest = t[-1]
+        dpg.set_axis_limits(f"{self.tag_prefix}_x_axis",
+                            max(0, latest - 20), latest + 1)
+        dpg.fit_axis_data(f"{self.tag_prefix}_y_axis")
+
+
 class PVSPPIChart:
     """PPI (Pulse-to-Pulse Interval) time-series chart for the Polar Verity Sense."""
 
@@ -214,20 +278,25 @@ class PVSHeartRateChart:
                                   tag=f"{self.tag_prefix}_x_axis")
                 with dpg.plot_axis(dpg.mvYAxis, label="BPM",
                                    tag=f"{self.tag_prefix}_y_axis"):
-                    dpg.add_line_series([], [], label="HR",
+                    dpg.add_line_series([], [], label="HR (PPI)",
                                         tag=f"{self.tag_prefix}_series")
                     dpg.set_axis_limits(f"{self.tag_prefix}_y_axis", 40, 180)
 
     def add_samples(self, samples: 'List[PVSSample]'):
-        """Add new HR samples from PPI data to the buffer."""
+        """Add new HR samples to the buffer.
+
+        Uses ppi_hr if available (from PPI stream), otherwise falls back to
+        hr_bpm from the standard BLE Heart Rate service.
+        """
         for s in samples:
-            if s.ppi_hr is None or s.ppi_hr == 0:
+            hr = s.ppi_hr if (s.ppi_hr is not None and s.ppi_hr != 0) else s.hr_bpm
+            if hr is None or hr == 0:
                 continue
             if not self._start_time:
                 self._start_time = s.timestamp
             t = s.timestamp - self._start_time
             self.ts.append(t)
-            self.hr_values.append(s.ppi_hr)
+            self.hr_values.append(hr)
 
     def update_plot(self):
         """Push buffered data to the DearPyGui plot."""
@@ -239,3 +308,5 @@ class PVSHeartRateChart:
         dpg.set_axis_limits(f"{self.tag_prefix}_x_axis",
                             max(0, latest - 60), latest + 5)
         dpg.fit_axis_data(f"{self.tag_prefix}_y_axis")
+
+

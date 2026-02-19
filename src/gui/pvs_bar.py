@@ -3,7 +3,7 @@
 Builds the 'Polar Verity Sense' connection bar with:
   - Device label
   - Status indicator
-  - Stream toggle checkboxes (ACC, GYR, PPI)
+  - Stream toggle checkboxes (ACC, GYR, MAG, PPI)
   - Connect/Disconnect button
 
 Keeps the bar logic separate from the main UIManager for modularity.
@@ -42,6 +42,9 @@ class PolarVeritySenseBar:
             dpg.add_checkbox(label="GYR", tag="pvs_gyro_toggle",
                              default_value=self.manager.enable_gyro,
                              callback=self._on_toggle_gyro)
+            dpg.add_checkbox(label="MAG", tag="pvs_mag_toggle",
+                             default_value=self.manager.enable_mag,
+                             callback=self._on_toggle_mag)
             dpg.add_checkbox(label="PPI", tag="pvs_ppi_toggle",
                              default_value=self.manager.enable_ppi,
                              callback=self._on_toggle_ppi)
@@ -60,6 +63,9 @@ class PolarVeritySenseBar:
     def _on_toggle_gyro(self, sender, app_data):
         self.manager.enable_gyro = app_data
 
+    def _on_toggle_mag(self, sender, app_data):
+        self.manager.enable_mag = app_data
+
     def _on_toggle_ppi(self, sender, app_data):
         self.manager.enable_ppi = app_data
 
@@ -74,6 +80,12 @@ class PolarVeritySenseBar:
             dpg.set_value("pvs_status_text", "Connecting...")
             dpg.configure_item("pvs_status_text", color=(255, 255, 0))
 
+    def _set_toggles_enabled(self, enabled: bool):
+        """Enable or disable all stream toggle checkboxes."""
+        for tag in ("pvs_acc_toggle", "pvs_gyro_toggle", "pvs_mag_toggle",
+                    "pvs_ppi_toggle"):
+            dpg.configure_item(tag, enabled=enabled)
+
     def poll_status(self):
         """Poll the manager status and update UI. Call each frame."""
         status = self.manager.status_message
@@ -87,9 +99,7 @@ class PolarVeritySenseBar:
             dpg.configure_item("pvs_status_text", color=(0, 255, 0))
             dpg.configure_item("pvs_connect_btn", label="Disconnect")
             # Disable stream toggles while connected
-            dpg.configure_item("pvs_acc_toggle", enabled=False)
-            dpg.configure_item("pvs_gyro_toggle", enabled=False)
-            dpg.configure_item("pvs_ppi_toggle", enabled=False)
+            self._set_toggles_enabled(False)
             # Show PVS graphs subsection
             if dpg.does_item_exist("header_pvs"):
                 dpg.configure_item("header_pvs", show=True)
@@ -100,9 +110,7 @@ class PolarVeritySenseBar:
             dpg.configure_item("pvs_status_text", color=(255, 0, 0))
             dpg.configure_item("pvs_connect_btn", label="Connect")
             # Re-enable stream toggles when disconnected
-            dpg.configure_item("pvs_acc_toggle", enabled=True)
-            dpg.configure_item("pvs_gyro_toggle", enabled=True)
-            dpg.configure_item("pvs_ppi_toggle", enabled=True)
+            self._set_toggles_enabled(True)
             # Hide PVS graphs subsection
             if dpg.does_item_exist("header_pvs"):
                 dpg.configure_item("header_pvs", show=False)

@@ -35,7 +35,10 @@ from src.gui.genki_bar import GenkiWaveBar
 from src.gui.genki_charts import GenkiGyroChart, GenkiAccChart, GenkiGyroSumChart
 from src.ble.pvs_manager import PolarVeritySenseManager
 from src.gui.pvs_bar import PolarVeritySenseBar
-from src.gui.pvs_charts import PVSAccChart, PVSGyroChart, PVSPPIChart, PVSHeartRateChart
+from src.gui.pvs_charts import (
+    PVSAccChart, PVSGyroChart, PVSMagChart, PVSPPIChart,
+    PVSHeartRateChart,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,7 @@ class UIManager:
         self.pvs_bar = PolarVeritySenseBar(self.pvs_manager)
         self.pvs_acc_chart = PVSAccChart()
         self.pvs_gyro_chart = PVSGyroChart()
+        self.pvs_mag_chart = PVSMagChart()
         self.pvs_ppi_chart = PVSPPIChart()
         self.pvs_hr_chart = PVSHeartRateChart()
 
@@ -252,6 +256,7 @@ class UIManager:
                         with dpg.group(tag="pvs_graphs_container"):
                             self.pvs_acc_chart.build("pvs_graphs_container")
                             self.pvs_gyro_chart.build("pvs_graphs_container")
+                            self.pvs_mag_chart.build("pvs_graphs_container")
                             self.pvs_ppi_chart.build("pvs_graphs_container")
                             self.pvs_hr_chart.build("pvs_graphs_container")
 
@@ -920,6 +925,8 @@ class UIManager:
             self.pvs_acc_chart.update_plot()
             self.pvs_gyro_chart.add_samples(samples)
             self.pvs_gyro_chart.update_plot()
+            self.pvs_mag_chart.add_samples(samples)
+            self.pvs_mag_chart.update_plot()
             self.pvs_ppi_chart.add_samples(samples)
             self.pvs_ppi_chart.update_plot()
             self.pvs_hr_chart.add_samples(samples)

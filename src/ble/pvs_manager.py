@@ -4,12 +4,14 @@ Manages the BLE connection to a Polar Verity Sense device using bleak.
 Runs BLE operations in a background thread with its own asyncio event loop
 (same pattern as GenkiWaveManager).
 
-Streams available:
-  - ACC  (accelerometer, 3-axis)
-  - GYR  (gyroscope, 3-axis)
-  - MAG  (magnetometer, 3-axis)
-  - PPI  (pulse-to-pulse interval / HRV)
-  - PPG  (raw optical heart rate)
+Uses SDK Mode (type 0x09) to enable raw high-frequency data streams:
+  - ACC  (0x02): accelerometer, 52Hz, 16-bit, 8G, 3ch
+  - GYR  (0x05): gyroscope, 52Hz, 16-bit, 2000dps, 3ch
+  - MAG  (0x06): magnetometer, 50Hz, 16-bit, 50G, 3ch
+  - PPI  (0x03): pulse-to-pulse interval (HRV) — mutually exclusive with SDK mode
+
+Note: PPG (0x15) is NOT supported on this device firmware
+(returns INVALID_MEASUREMENT_TYPE). SDK mode and PPI are mutually exclusive.
 
 Data is delivered via a thread-safe deque that the GUI can poll.
 """
@@ -27,11 +29,10 @@ from bleak import BleakClient, BleakScanner
 
 from src.ble.dbus_agent import register_agent
 from src.ble.pvs_parser import (
-    PMD_TYPE_ACC, PMD_TYPE_PPI, PMD_TYPE_GYR, PMD_TYPE_MAG, PMD_TYPE_PPG,
-    parse_pmd_data, parse_settings_response,
-    build_get_settings_command, build_start_command, build_stop_command,
-    PVSDataPacket, PVSAccSample, PVSGyroSample, PVSMagSample,
-    PVSPPISample, PVSPPGSample,
+    PMD_TYPE_ACC, PMD_TYPE_PPI, PMD_TYPE_GYR, PMD_TYPE_MAG,
+    parse_pmd_data,
+    build_sdk_cmd, build_stop_command,
+    PVSDataPacket,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,8 +42,16 @@ PMD_SERVICE_UUID = "fb005c80-02e7-f387-1cad-8acd2d8df0c8"
 PMD_CONTROL_UUID = "fb005c81-02e7-f387-1cad-8acd2d8df0c8"
 PMD_DATA_UUID = "fb005c82-02e7-f387-1cad-8acd2d8df0c8"
 
+# Standard BLE Heart Rate Service
+HR_SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"
+HR_MEASUREMENT_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
+
 # Device name prefixes to scan for
 PVS_NAME_PREFIXES = ("Polar Sense", "Polar Verity Sense")
+
+# SDK Mode command bytes
+SDK_MODE_ENABLE = bytearray([0x02, 0x09])
+SDK_MODE_DISABLE = bytearray([0x03, 0x09])
 
 
 @dataclass
@@ -52,12 +61,12 @@ class PVSSample:
     Depending on which streams are active, some fields may be None.
     """
     timestamp: float
-    acc: Optional[tuple] = None   # (x, y, z) in mg
-    gyro: Optional[tuple] = None  # (x, y, z) in dps
-    mag: Optional[tuple] = None   # (x, y, z) in Gauss/10
-    ppi_ms: Optional[int] = None  # Pulse-to-pulse interval in ms
-    ppi_hr: Optional[int] = None  # Heart rate from PPI
-    ppg_channels: Optional[List[int]] = None  # Raw PPG channel values
+    acc: Optional[tuple] = None        # (x, y, z) in mg
+    gyro: Optional[tuple] = None       # (x, y, z) in dps
+    mag: Optional[tuple] = None        # (x, y, z) in Gauss/10
+    ppi_ms: Optional[int] = None       # Pulse-to-pulse interval in ms
+    ppi_hr: Optional[int] = None       # Heart rate from PPI
+    hr_bpm: Optional[int] = None       # Heart rate from BLE HR service
 
 
 class PVSBLEThread(threading.Thread):
@@ -88,6 +97,13 @@ class PVSBLEThread(threading.Thread):
 class PolarVeritySenseManager:
     """Manages the Polar Verity Sense BLE connection and data streaming.
 
+    Uses SDK Mode to enable raw high-frequency data streams. The stream
+    settings are hardcoded to the known-good values from the working test
+    script (test_pvs_sdk_stream.py), avoiding the unreliable query-then-start
+    approach.
+
+    PPG data is fed into a PPGHeartRateCalculator to derive HR in BPM.
+
     Usage:
         manager = PolarVeritySenseManager()
         manager.connect()  # scans and connects
@@ -97,21 +113,6 @@ class PolarVeritySenseManager:
         manager.disconnect()
         manager.shutdown()
     """
-
-    # Default stream settings for Polar Verity Sense
-    # PVS uses different sample rates than H10: 26, 52, 104, 208, 416 Hz
-    DEFAULT_ACC_RATE = 52
-    DEFAULT_ACC_RESOLUTION = 16
-    DEFAULT_ACC_RANGE = 8
-    DEFAULT_GYR_RATE = 52
-    DEFAULT_GYR_RESOLUTION = 16
-    DEFAULT_GYR_RANGE = 2000
-    DEFAULT_MAG_RATE = 10
-    DEFAULT_MAG_RESOLUTION = 16
-
-    # Fallback sample rates to try if the default fails
-    ACC_RATE_FALLBACKS = [52, 26, 50, 25, 104, 208]
-    GYR_RATE_FALLBACKS = [52, 26, 50, 25, 104, 208]
 
     def __init__(self):
         self._ble_thread: Optional[PVSBLEThread] = None
@@ -129,12 +130,11 @@ class PolarVeritySenseManager:
         # Stream enable flags (set before connecting)
         self.enable_acc = True
         self.enable_gyro = True
-        self.enable_mag = False   # Off by default (less common)
-        self.enable_ppi = True
-        self.enable_ppg = False   # Off by default (high bandwidth)
-
-        # Settings received from device
-        self._device_settings: Dict[int, dict] = {}
+        self.enable_mag = True
+        # PPI: disabled by default — mutually exclusive with SDK mode on this device.
+        # Enable PPI only if you want HR/PPI data without IMU streams.
+        self.enable_ppi = False
+        self.enable_hr = True     # Standard BLE Heart Rate service (works in SDK mode too)
 
         # Control point response handling
         self._cp_response_event: Optional[asyncio.Event] = None
@@ -214,28 +214,50 @@ class PolarVeritySenseManager:
             return samples
 
     def _enqueue_samples(self, packet: PVSDataPacket):
-        """Convert parsed packet to PVSSample objects and enqueue them."""
+        """Convert parsed packet to PVSSample objects and enqueue them.
+
+        Uses wall-clock time (time.time()) as the base for the last sample in
+        the packet, then reconstructs earlier sample times by subtracting
+        index * dt. This keeps all timestamps in Unix epoch space (compatible
+        with HR samples from the BLE HR service) while still giving each sample
+        its correct evenly-spaced timestamp.
+        """
+        # Sample rates for each stream type (Hz)
+        _SAMPLE_RATES = {
+            0x02: 52.0,   # ACC
+            0x05: 52.0,   # GYR
+            0x06: 50.0,   # MAG
+        }
+        sample_rate = _SAMPLE_RATES.get(packet.measurement_type, 50.0)
+        dt = 1.0 / sample_rate
         now = time.time()
 
         with self._samples_lock:
             if packet.acc_samples:
-                for s in packet.acc_samples:
+                n = len(packet.acc_samples)
+                # now = time of last sample; earlier samples go back by dt each
+                for i, s in enumerate(packet.acc_samples):
+                    t = now - (n - 1 - i) * dt
                     self._samples.append(PVSSample(
-                        timestamp=now,
+                        timestamp=t,
                         acc=(s.x, s.y, s.z),
                     ))
 
             if packet.gyro_samples:
-                for s in packet.gyro_samples:
+                n = len(packet.gyro_samples)
+                for i, s in enumerate(packet.gyro_samples):
+                    t = now - (n - 1 - i) * dt
                     self._samples.append(PVSSample(
-                        timestamp=now,
+                        timestamp=t,
                         gyro=(s.x, s.y, s.z),
                     ))
 
             if packet.mag_samples:
-                for s in packet.mag_samples:
+                n = len(packet.mag_samples)
+                for i, s in enumerate(packet.mag_samples):
+                    t = now - (n - 1 - i) * dt
                     self._samples.append(PVSSample(
-                        timestamp=now,
+                        timestamp=t,
                         mag=(s.x, s.y, s.z),
                     ))
 
@@ -247,18 +269,43 @@ class PolarVeritySenseManager:
                         ppi_hr=s.hr,
                     ))
 
-            if packet.ppg_samples:
-                for s in packet.ppg_samples:
-                    self._samples.append(PVSSample(
-                        timestamp=now,
-                        ppg_channels=s.channels,
-                    ))
-
     def _on_pmd_data(self, sender, data: bytearray):
         """Callback for PMD Data notifications."""
         packet = parse_pmd_data(data)
         if packet:
             self._enqueue_samples(packet)
+
+    def _on_hr_notification(self, sender, data: bytearray):
+        """Callback for standard BLE Heart Rate Measurement notifications.
+
+        Heart Rate Measurement format (Bluetooth SIG):
+          Byte 0: Flags
+            - Bit 0: HR format (0 = uint8, 1 = uint16)
+            - Bit 4: RR-interval present
+          Byte 1 (or 1-2): Heart rate value
+          Remaining: RR intervals (uint16 LE, in 1/1024 sec units)
+        """
+        if len(data) < 2:
+            return
+
+        flags = data[0]
+        hr_format_16bit = bool(flags & 0x01)
+
+        if hr_format_16bit:
+            if len(data) < 3:
+                return
+            hr_bpm = struct.unpack_from('<H', data, 1)[0]
+        else:
+            hr_bpm = data[1]
+
+        now = time.time()
+        with self._samples_lock:
+            self._samples.append(PVSSample(
+                timestamp=now,
+                hr_bpm=hr_bpm,
+            ))
+
+        logger.debug(f"PVS HR: {hr_bpm} bpm")
 
     def _on_cp_response(self, sender, data: bytearray):
         """Callback for PMD Control Point notifications (responses).
@@ -266,69 +313,40 @@ class PolarVeritySenseManager:
         Response format: [0xF0, op_code, measurement_type, status, ...]
         """
         logger.debug(f"PVS CP notification: {data.hex()}")
+        if len(data) >= 4:
+            logger.info(f"  [CTRL] Op:0x{data[1]:02x} Type:0x{data[2]:02x} "
+                        f"Status:0x{data[3]:02x}")
         self._cp_response_data = data
         if self._cp_response_event:
             self._cp_response_event.set()
 
-    async def _send_cp_command(self, client: BleakClient, command: bytearray,
-                                timeout: float = 5.0) -> Optional[bytearray]:
-        """Send a command to the PMD Control Point and wait for response."""
+    async def _send_cmd(self, client: BleakClient, cmd: bytearray,
+                        label: str, timeout: float = 3.0) -> bool:
+        """Send a PMD command and wait for success response.
+
+        Returns True if command succeeded (status 0x00 or 0x06=already active).
+        """
         self._cp_response_event = asyncio.Event()
         self._cp_response_data = None
 
-        await client.write_gatt_char(PMD_CONTROL_UUID, command, response=True)
+        logger.info(f"  Sending {label}: {cmd.hex()}")
+        await client.write_gatt_char(PMD_CONTROL_UUID, cmd, response=True)
 
         try:
             await asyncio.wait_for(self._cp_response_event.wait(), timeout=timeout)
+            resp = self._cp_response_data
+            if resp and len(resp) >= 4:
+                status = resp[3]
+                if status in (0x00, 0x06):  # 0x06 = already active
+                    logger.info(f"  -> {label} OK (status=0x{status:02x})")
+                    return True
+                else:
+                    logger.warning(f"  -> {label} FAILED (status=0x{status:02x})")
+                    return False
         except asyncio.TimeoutError:
-            logger.warning("PVS: Control Point response timeout")
-            return None
+            logger.warning(f"  -> {label} TIMEOUT")
 
-        return self._cp_response_data
-
-    async def _query_settings(self, client: BleakClient, meas_type: int) -> dict:
-        """Query device settings for a measurement type."""
-        cmd = build_get_settings_command(meas_type)
-        response = await self._send_cp_command(client, cmd)
-        if response:
-            settings = parse_settings_response(response)
-            self._device_settings[meas_type] = settings
-            logger.info(f"PVS settings for type 0x{meas_type:02x}: {settings}")
-            return settings
-        return {}
-
-    async def _start_stream(self, client: BleakClient, meas_type: int,
-                            sample_rate: int = 0, resolution: int = 0,
-                            range_val: int = 0, channels: int = 0) -> bool:
-        """Start a measurement stream on the device.
-
-        Uses hardcoded known-good settings (like the H10 manager does)
-        rather than parsing the settings response, which has a complex
-        format that varies between firmware versions.
-        """
-        cmd = build_start_command(meas_type, sample_rate, resolution,
-                                  range_val, channels)
-        logger.info(f"PVS: Sending start command for type 0x{meas_type:02x}: {cmd.hex()}")
-        response = await self._send_cp_command(client, cmd)
-        # Response format: [0xF0, op_code(0x02), meas_type, status(0x00=ok)]
-        if response and len(response) >= 4 and response[3] == 0x00:
-            logger.info(f"PVS: Started stream type 0x{meas_type:02x}")
-            return True
-        else:
-            status = response[3] if response and len(response) >= 4 else -1
-            logger.error(f"PVS: Failed to start stream type 0x{meas_type:02x}, "
-                        f"status=0x{status:02x}, "
-                        f"response: {response.hex() if response else 'None'}")
-            return False
-
-    async def _stop_stream(self, client: BleakClient, meas_type: int):
-        """Stop a measurement stream on the device."""
-        cmd = build_stop_command(meas_type)
-        try:
-            await client.write_gatt_char(PMD_CONTROL_UUID, cmd, response=True)
-            logger.info(f"PVS: Stopped stream type 0x{meas_type:02x}")
-        except Exception as e:
-            logger.warning(f"PVS: Error stopping stream 0x{meas_type:02x}: {e}")
+        return False
 
     async def _pvs_ble_task(self, address: Optional[str]):
         """Runs on the BLE thread — connects to PVS and streams data."""
@@ -394,84 +412,97 @@ class PolarVeritySenseManager:
                 except Exception as e:
                     logger.warning(f"PVS: Pairing result (may already be paired): {e}")
 
-                # Log discovered services for debugging
-                logger.info("PVS: Listing discovered services...")
-                for service in client.services:
-                    logger.info(f"  Service: {service.uuid}")
-                    for char in service.characteristics:
-                        logger.info(f"    Char: {char.uuid} ({char.properties})")
-
                 # Subscribe to Control Point notifications (for responses)
                 logger.info("PVS: Subscribing to PMD Control Point...")
                 await client.start_notify(PMD_CONTROL_UUID, self._on_cp_response)
+                await asyncio.sleep(0.5)
+
+                # Subscribe to Data notifications
+                logger.info("PVS: Subscribing to PMD Data...")
+                await client.start_notify(PMD_DATA_UUID, self._on_pmd_data)
                 await asyncio.sleep(0.3)
 
-                # Subscribe to Data notifications with use_start_notify=True
-                # (avoids bluetoothd crashes with AcquireNotify on high-freq streams)
-                logger.info("PVS: Subscribing to PMD Data (use_start_notify=True)...")
-                await client.start_notify(
-                    PMD_DATA_UUID, self._on_pmd_data,
-                    bluez={"use_start_notify": True}
-                )
-                await asyncio.sleep(0.3)
+                # Subscribe to standard BLE Heart Rate service if available
+                hr_streaming = False
+                if self.enable_hr:
+                    try:
+                        logger.info("PVS: Subscribing to Heart Rate service...")
+                        await client.start_notify(
+                            HR_MEASUREMENT_UUID, self._on_hr_notification
+                        )
+                        hr_streaming = True
+                        logger.info("PVS: Heart Rate notifications started")
+                        await asyncio.sleep(0.2)
+                    except Exception as e:
+                        logger.warning(f"PVS: HR subscription failed (non-fatal): {e}")
 
-                # Start requested streams
                 active_streams = []
 
-                if self.enable_acc:
-                    # Try multiple sample rates until one works
-                    for rate in self.ACC_RATE_FALLBACKS:
-                        ok = await self._start_stream(
-                            client, PMD_TYPE_ACC,
-                            sample_rate=rate,
-                            resolution=self.DEFAULT_ACC_RESOLUTION,
-                            range_val=self.DEFAULT_ACC_RANGE,
+                # SDK mode and PPI are mutually exclusive on this device:
+                #   - SDK mode active  -> PPI returns INVALID_STATE (0x0c)
+                #   - PPI active       -> SDK mode returns INVALID_STATE (0x0c)
+                # Strategy: if any IMU stream is requested, use SDK mode (skip PPI).
+                # If only PPI/HR is requested, skip SDK mode so PPI can start.
+                need_sdk = self.enable_acc or self.enable_gyro or self.enable_mag
+
+                if not need_sdk and self.enable_ppi:
+                    # Normal mode: disable SDK mode first to clear any stale device
+                    # state from a previous session, then start PPI.
+                    logger.info("PVS: Disabling SDK Mode (clear stale state)...")
+                    try:
+                        await client.write_gatt_char(
+                            PMD_CONTROL_UUID, SDK_MODE_DISABLE, response=True
                         )
-                        if ok:
-                            active_streams.append(PMD_TYPE_ACC)
-                            logger.info(f"PVS: ACC started at {rate} Hz")
-                            break
-                        await asyncio.sleep(0.2)
+                        await asyncio.sleep(0.3)
+                    except Exception:
+                        pass  # Ignore — device may not have had SDK mode active
 
-                if self.enable_gyro:
-                    # Try multiple sample rates until one works
-                    for rate in self.GYR_RATE_FALLBACKS:
-                        ok = await self._start_stream(
-                            client, PMD_TYPE_GYR,
-                            sample_rate=rate,
-                            resolution=self.DEFAULT_GYR_RESOLUTION,
-                            range_val=self.DEFAULT_GYR_RANGE,
-                        )
-                        if ok:
-                            active_streams.append(PMD_TYPE_GYR)
-                            logger.info(f"PVS: GYR started at {rate} Hz")
-                            break
-                        await asyncio.sleep(0.2)
-
-                if self.enable_mag:
-                    ok = await self._start_stream(
-                        client, PMD_TYPE_MAG,
-                        sample_rate=self.DEFAULT_MAG_RATE,
-                        resolution=self.DEFAULT_MAG_RESOLUTION,
-                    )
-                    if ok:
-                        active_streams.append(PMD_TYPE_MAG)
-
-                if self.enable_ppi:
-                    # PPI doesn't need sample rate / resolution settings
-                    ok = await self._start_stream(client, PMD_TYPE_PPI)
+                    ppi_cmd = bytearray([0x02, PMD_TYPE_PPI])
+                    ok = await self._send_cmd(client, ppi_cmd, "START_PPI")
                     if ok:
                         active_streams.append(PMD_TYPE_PPI)
+                    await asyncio.sleep(0.2)
 
-                if self.enable_ppg:
-                    ok = await self._start_stream(
-                        client, PMD_TYPE_PPG,
-                        channels=4,
-                    )
+                if need_sdk:
+                    # Enable SDK Mode — required for raw IMU streaming.
+                    # Disables internal HR algorithms; PPI cannot run simultaneously.
+                    logger.info("PVS: Enabling SDK Mode...")
+                    sdk_ok = await self._send_cmd(client, SDK_MODE_ENABLE, "SDK_MODE_ENABLE")
+                    if not sdk_ok:
+                        logger.warning("PVS: SDK Mode failed — falling back to PPI/HR only")
+                        if self.enable_ppi:
+                            ppi_cmd = bytearray([0x02, PMD_TYPE_PPI])
+                            ok = await self._send_cmd(client, ppi_cmd, "START_PPI")
+                            if ok:
+                                active_streams.append(PMD_TYPE_PPI)
+                    await asyncio.sleep(0.5)
+
+                # Start IMU streams (only attempted when SDK mode is active)
+                if self.enable_acc and need_sdk:
+                    # 52Hz, 16-bit, 8G, 3ch
+                    cmd = build_sdk_cmd(PMD_TYPE_ACC, 52, 16, 8, 3)
+                    ok = await self._send_cmd(client, cmd, "START_ACC")
                     if ok:
-                        active_streams.append(PMD_TYPE_PPG)
+                        active_streams.append(PMD_TYPE_ACC)
+                    await asyncio.sleep(0.2)
 
-                if not active_streams:
+                if self.enable_gyro and need_sdk:
+                    # 52Hz, 16-bit, 2000dps, 3ch
+                    cmd = build_sdk_cmd(PMD_TYPE_GYR, 52, 16, 2000, 3)
+                    ok = await self._send_cmd(client, cmd, "START_GYR")
+                    if ok:
+                        active_streams.append(PMD_TYPE_GYR)
+                    await asyncio.sleep(0.2)
+
+                if self.enable_mag and need_sdk:
+                    # 50Hz, 16-bit, 50G, 3ch
+                    cmd = build_sdk_cmd(PMD_TYPE_MAG, 50, 16, 50, 3)
+                    ok = await self._send_cmd(client, cmd, "START_MAG")
+                    if ok:
+                        active_streams.append(PMD_TYPE_MAG)
+                    await asyncio.sleep(0.2)
+
+                if not active_streams and not hr_streaming:
                     self._set_status(False, "No streams started")
                     logger.error("PVS: Failed to start any streams")
                     return
@@ -479,9 +510,10 @@ class PolarVeritySenseManager:
                 stream_names = {
                     PMD_TYPE_ACC: "ACC", PMD_TYPE_GYR: "GYR",
                     PMD_TYPE_MAG: "MAG", PMD_TYPE_PPI: "PPI",
-                    PMD_TYPE_PPG: "PPG",
                 }
                 names = [stream_names.get(s, f"0x{s:02x}") for s in active_streams]
+                if hr_streaming:
+                    names.append("HR")
                 self._set_status(True, f"Streaming: {', '.join(names)}")
                 self._connecting = False
                 logger.info(f"PVS: Streaming {', '.join(names)}")
@@ -490,14 +522,33 @@ class PolarVeritySenseManager:
                 while not self._cancel:
                     await asyncio.sleep(0.1)
 
+                logger.info("PVS: Stopping streams...")
+
                 # Stop all active streams
                 for stream_type in active_streams:
-                    await self._stop_stream(client, stream_type)
+                    try:
+                        stop_cmd = bytearray([0x03, stream_type])
+                        await client.write_gatt_char(PMD_CONTROL_UUID, stop_cmd, response=True)
+                        logger.info(f"PVS: Stopped stream 0x{stream_type:02x}")
+                    except Exception:
+                        pass
+
+                await asyncio.sleep(0.5)
+
+                # Disable SDK Mode (re-enable internal algorithms)
+                try:
+                    await client.write_gatt_char(PMD_CONTROL_UUID, SDK_MODE_DISABLE,
+                                                  response=True)
+                    logger.info("PVS: SDK Mode disabled")
+                except Exception:
+                    pass
 
                 # Stop notifications
                 try:
                     await client.stop_notify(PMD_DATA_UUID)
                     await client.stop_notify(PMD_CONTROL_UUID)
+                    if hr_streaming:
+                        await client.stop_notify(HR_MEASUREMENT_UUID)
                 except Exception:
                     pass
 
