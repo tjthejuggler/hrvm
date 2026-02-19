@@ -33,6 +33,9 @@ from src.gui.pacer import PacerEngine
 from src.ble.genki_manager import GenkiWaveManager
 from src.gui.genki_bar import GenkiWaveBar
 from src.gui.genki_charts import GenkiGyroChart, GenkiAccChart, GenkiGyroSumChart
+from src.ble.pvs_manager import PolarVeritySenseManager
+from src.gui.pvs_bar import PolarVeritySenseBar
+from src.gui.pvs_charts import PVSAccChart, PVSGyroChart, PVSPPIChart, PVSHeartRateChart
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,14 @@ class UIManager:
         self.genki_acc_chart = GenkiAccChart()
         self.genki_gyro_sum_chart = GenkiGyroSumChart()
 
+        # Polar Verity Sense manager + bar + charts
+        self.pvs_manager = PolarVeritySenseManager()
+        self.pvs_bar = PolarVeritySenseBar(self.pvs_manager)
+        self.pvs_acc_chart = PVSAccChart()
+        self.pvs_gyro_chart = PVSGyroChart()
+        self.pvs_ppi_chart = PVSPPIChart()
+        self.pvs_hr_chart = PVSHeartRateChart()
+
         # UI Element Tags
         self.window_tag = "Primary Window"
         self.assessment_status_tag = "Assessment Status"
@@ -150,6 +161,10 @@ class UIManager:
 
             # --- Genki Wave Top Bar ---
             self.genki_bar.build()
+            dpg.add_separator()
+
+            # --- Polar Verity Sense Top Bar ---
+            self.pvs_bar.build()
             dpg.add_separator()
 
             # --- Main Layout ---
@@ -228,6 +243,17 @@ class UIManager:
                             self.genki_gyro_chart.build("genki_wave_graphs_container")
                             self.genki_acc_chart.build("genki_wave_graphs_container")
                             self.genki_gyro_sum_chart.build("genki_wave_graphs_container")
+
+                    # --- Polar Verity Sense Device Subsection ---
+                    with dpg.collapsing_header(label="Polar Verity Sense", tag="header_pvs",
+                                               default_open=True, show=False):
+                        dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
+
+                        with dpg.group(tag="pvs_graphs_container"):
+                            self.pvs_acc_chart.build("pvs_graphs_container")
+                            self.pvs_gyro_chart.build("pvs_graphs_container")
+                            self.pvs_ppi_chart.build("pvs_graphs_container")
+                            self.pvs_hr_chart.build("pvs_graphs_container")
 
                 with dpg.theme(tag="theme_graphs_header"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
@@ -385,6 +411,7 @@ class UIManager:
             self.poll_ble_status()
             self._update_heartbeat_blink()
             self._poll_genki_wave()
+            self._poll_pvs()
 
             # Counting game tick (checks timer expiry each frame)
             self.counting_game.tick()
@@ -400,6 +427,7 @@ class UIManager:
         if self.audio_enabled:
             self.audio_feedback.stop()
         self.genki_manager.shutdown()
+        self.pvs_manager.shutdown()
         if self.shm:
             self.shm.close()
         dpg.destroy_context()
@@ -879,6 +907,23 @@ class UIManager:
             self.genki_acc_chart.update_plot()
             self.genki_gyro_sum_chart.add_samples(samples)
             self.genki_gyro_sum_chart.update_plot()
+
+    # --- Polar Verity Sense Polling ---
+
+    def _poll_pvs(self):
+        """Poll the Polar Verity Sense manager for status and data each frame."""
+        self.pvs_bar.poll_status()
+
+        samples = self.pvs_manager.poll()
+        if samples:
+            self.pvs_acc_chart.add_samples(samples)
+            self.pvs_acc_chart.update_plot()
+            self.pvs_gyro_chart.add_samples(samples)
+            self.pvs_gyro_chart.update_plot()
+            self.pvs_ppi_chart.add_samples(samples)
+            self.pvs_ppi_chart.update_plot()
+            self.pvs_hr_chart.add_samples(samples)
+            self.pvs_hr_chart.update_plot()
 
     # --- Presets ---
 
