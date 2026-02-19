@@ -23,7 +23,8 @@ from src.gui.audio_feedback import AudioFeedback
 from src.gui.charts import (
     BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart,
     RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart,
-    ACCChart, ECGChart
+    ACCChart, ECGChart,
+    HRVTachogramChart, HRVPoincareChart, HRVRMSSDChart, HRVSDNNChart, HRVCoherenceChart,
 )
 from src.gui.counting_game import CountingGameWidget
 from src.gui.rapid_change_game import RapidChangeWidget
@@ -75,8 +76,13 @@ class UIManager:
         self.is_connected = False  # Polar H10 connection state
         self.is_genki_connected = False  # Genki Wave connection state
         self.is_recording = False
-        self.is_json_recording = False # New flag for JSON recording
-        # self.session_mode = None  # Removed session mode
+        self.is_json_recording = False  # Flag for JSON recording
+
+        # HRV source tracking: "h10" | "pvs" | None
+        # H10 is preferred; PVS is used as fallback when H10 is not connected
+        # and PVS is streaming HR.
+        self._hrv_source: Optional[str] = None
+        self._pvs_hr_streaming = False  # True when PVS is connected AND streaming HR
 
         # Heartbeat blink indicator state
         self._blink_time = 0.0       # time.time() when last blink was triggered
@@ -116,7 +122,7 @@ class UIManager:
             filter_cutoff_high=15.0
         )
 
-        # Chart widgets (collapsible)
+        # Chart widgets — Polar H10 section
         self.biofeedback_chart = BiofeedbackChart()
         self.heartbeat_chart = HeartbeatChart()
         self.tachogram_chart = TachogramChart()
@@ -126,6 +132,13 @@ class UIManager:
         self.coherence_chart = CoherenceHistoryChart()
         self.acc_chart = ACCChart()
         self.ecg_chart = ECGChart()
+
+        # HRV section charts (device-agnostic, H10 preferred / PVS fallback)
+        self.hrv_tachogram_chart = HRVTachogramChart()
+        self.hrv_poincare_chart = HRVPoincareChart()
+        self.hrv_rmssd_chart = HRVRMSSDChart()
+        self.hrv_sdnn_chart = HRVSDNNChart()
+        self.hrv_coherence_chart = HRVCoherenceChart()
 
         # Counting game widget (shown only in counting mode)
         self.counting_game = CountingGameWidget()
@@ -146,6 +159,7 @@ class UIManager:
         # Polar Verity Sense manager + bar + charts
         self.pvs_manager = PolarVeritySenseManager()
         self.pvs_bar = PolarVeritySenseBar(self.pvs_manager)
+        self.pvs_bar.on_hr_streaming_changed = self._on_pvs_hr_streaming_changed
         self.pvs_acc_chart = PVSAccChart()
         self.pvs_gyro_chart = PVSGyroChart()
         self.pvs_mag_chart = PVSMagChart()
@@ -155,6 +169,59 @@ class UIManager:
         # UI Element Tags
         self.window_tag = "Primary Window"
         self.assessment_status_tag = "Assessment Status"
+
+    # ------------------------------------------------------------------
+    # HRV source management
+    # ------------------------------------------------------------------
+
+    def _update_hrv_source(self):
+        """Determine which device is the active HRV source and update the
+        HRV section visibility accordingly.
+
+        Priority: H10 > PVS.
+        PVS is used as fallback only when H10 is not connected AND PVS is
+        connected AND streaming HR (status message contains "HR").
+        This correctly excludes SDK mode (ACC/GYR/MAG only) where PVS is
+        connected but not streaming HR.
+        """
+        if self.is_connected:
+            new_source = "h10"
+        elif self._pvs_is_streaming_hr():
+            new_source = "pvs"
+        else:
+            new_source = None
+
+        if new_source != self._hrv_source:
+            self._hrv_source = new_source
+            self._refresh_hrv_section_visibility()
+
+    def _pvs_is_streaming_hr(self) -> bool:
+        """Return True if PVS is connected and actively streaming HR data.
+
+        HR is available when the status message contains 'HR' — this is set
+        by the manager when the BLE HR service subscription succeeds.
+        PPI mode also provides HR via ppi_hr field.
+        """
+        if not self.pvs_manager.connected:
+            return False
+        status = self.pvs_manager.status_message
+        return "HR" in status or "PPI" in status
+
+    def _refresh_hrv_section_visibility(self):
+        """Show or hide the HRV graphs section based on current HRV source."""
+        if not dpg.does_item_exist("header_hrv"):
+            return
+        show = self._hrv_source is not None
+        dpg.configure_item("header_hrv", show=show)
+
+    def _on_pvs_hr_streaming_changed(self, is_streaming: bool):
+        """Called by PolarVeritySenseBar when PVS HR streaming state changes."""
+        self._pvs_hr_streaming = is_streaming
+        self._update_hrv_source()
+
+    # ------------------------------------------------------------------
+    # UI Setup
+    # ------------------------------------------------------------------
 
     def setup_ui(self):
         dpg.create_context()
@@ -189,22 +256,19 @@ class UIManager:
 
             # --- Charts Section (collapsible, no tabs) ---
             with dpg.child_window(width=-1, height=-1, border=True, tag="charts_area"):
-                # dpg.add_text("Charts Area", color=(0, 255, 255))
-                # dpg.add_separator()
 
                 # --- Apps Section ---
                 with dpg.theme(tag="apps_header_theme"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
-                        dpg.add_theme_color(dpg.mvThemeCol_Header, (100, 50, 200, 100))  # Purple tint
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (100, 50, 200, 100))
                         dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (120, 70, 220, 150))
                         dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (140, 90, 240, 200))
                         dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
-                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10) # Increase size
+                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10)
 
                 with dpg.collapsing_header(label="APPS", tag="header_apps", default_open=True):
                     dpg.bind_item_theme(dpg.last_item(), "apps_header_theme")
-                    
-                    # We create a container (group) for apps so they have a consistent parent
+
                     with dpg.group(tag="apps_container"):
                         self.counting_game.build("apps_container")
                         self.rapid_change_game.build("apps_container")
@@ -213,13 +277,13 @@ class UIManager:
                 # --- Graphs Section ---
                 with dpg.theme(tag="graphs_header_theme"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
-                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 100, 200, 100))  # Blue tint
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 100, 200, 100))
                         dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (20, 120, 220, 150))
                         dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (40, 140, 240, 200))
                         dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
-                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10) # Increase size
+                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10)
 
-                # Device subsection theme (slightly different shade for nesting)
+                # Device subsection theme
                 with dpg.theme(tag="device_subsection_theme"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
                         dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 80, 160, 80))
@@ -228,8 +292,30 @@ class UIManager:
                         dpg.add_theme_color(dpg.mvThemeCol_Text, (200, 230, 255, 255))
                         dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 8, 8)
 
-                with dpg.collapsing_header(label="GRAPHS", tag="header_graphs", default_open=True):
+                # HRV subsection theme (green tint to distinguish from device sections)
+                with dpg.theme(tag="hrv_subsection_theme"):
+                    with dpg.theme_component(dpg.mvCollapsingHeader):
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 120, 60, 100))
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (10, 150, 80, 140))
+                        dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (20, 180, 100, 180))
+                        dpg.add_theme_color(dpg.mvThemeCol_Text, (180, 255, 200, 255))
+                        dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 8, 8)
+
+                with dpg.collapsing_header(label="GRAPHS", tag="header_graphs",
+                                           default_open=True):
                     dpg.bind_item_theme(dpg.last_item(), "graphs_header_theme")
+
+                    # --- HRV Section (device-agnostic, H10 preferred / PVS fallback) ---
+                    with dpg.collapsing_header(label="HRV", tag="header_hrv",
+                                               default_open=True, show=False):
+                        dpg.bind_item_theme(dpg.last_item(), "hrv_subsection_theme")
+
+                        with dpg.group(tag="hrv_graphs_container"):
+                            self.hrv_tachogram_chart.build("hrv_graphs_container")
+                            self.hrv_poincare_chart.build("hrv_graphs_container")
+                            self.hrv_rmssd_chart.build("hrv_graphs_container")
+                            self.hrv_sdnn_chart.build("hrv_graphs_container")
+                            self.hrv_coherence_chart.build("hrv_graphs_container")
 
                     # --- Polar H10 Device Subsection ---
                     with dpg.collapsing_header(label="Polar H10", tag="header_polar_h10",
@@ -271,7 +357,7 @@ class UIManager:
 
                 with dpg.theme(tag="theme_graphs_header"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
-                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 100, 150, 150)) # Blue tint
+                        dpg.add_theme_color(dpg.mvThemeCol_Header, (0, 100, 150, 150))
                         dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (20, 120, 170, 170))
                         dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 255, 255, 255))
                 dpg.bind_item_theme("header_graphs", "theme_graphs_header")
@@ -456,7 +542,7 @@ class UIManager:
                 time.sleep(0.1)
 
     def handle_processed_data(self, data: ProcessedData):
-        """Handle ProcessedData from signal processor."""
+        """Handle ProcessedData from signal processor (Polar H10 source)."""
         current_time = time.time() - self.start_time
 
         # Update HR display
@@ -481,7 +567,7 @@ class UIManager:
                 dpg.set_axis_limits("bf_x_axis",
                                     max(0, current_time - 60), current_time + 5)
 
-        # RMSSD
+        # RMSSD / SDNN — update top-bar metrics (H10 is the primary source)
         self.current_rmssd = data.hrv_rmssd
         dpg.set_value("rmssd_display", f"{self.current_rmssd:.1f} ms")
         dpg.set_value("sdnn_display", f"{data.hrv_sdnn:.1f} ms")
@@ -491,7 +577,7 @@ class UIManager:
         self.current_coherence = data.coherence_score
         self.resonance_breathing.update_resonance_score(self.current_coherence)
 
-        # Metrics history
+        # H10-specific history charts (in the Polar H10 section)
         self.rmssd_chart.add_data(current_time, self.current_rmssd)
         self.rmssd_chart.update_plot()
         self.sdnn_chart.add_data(current_time, data.hrv_sdnn)
@@ -499,22 +585,43 @@ class UIManager:
         self.coherence_chart.add_data(current_time, self.current_coherence)
         self.coherence_chart.update_plot()
 
-        # RR intervals -> heartbeat chart, tachogram, poincaré
+        # HRV section charts (H10 is the active source)
+        self.hrv_rmssd_chart.add_data(current_time, self.current_rmssd)
+        self.hrv_rmssd_chart.update_plot()
+        self.hrv_sdnn_chart.add_data(current_time, data.hrv_sdnn)
+        self.hrv_sdnn_chart.update_plot()
+        self.hrv_coherence_chart.add_data(current_time, self.current_coherence)
+        self.hrv_coherence_chart.update_plot()
+
+        # RR intervals -> heartbeat chart, tachogram, poincaré, HRV section
         if data.rr_intervals:
             self.heartbeat_chart.add_beats(data.timestamp, data.rr_intervals,
                                            self.start_time)
             self.heartbeat_chart.update_plot(current_time)
 
-            self.tachogram_chart.add_rr(data.rr_intervals)
-            self.tachogram_chart.update_plot()
+            self.tachogram_chart.add_rr(data.rr_intervals, current_time)
+            self.tachogram_chart.update_plot(current_time)
 
             self.poincare_chart.add_rr(data.rr_intervals)
             self.poincare_chart.update_plot()
 
-            # Feed RR intervals to counting game (always active if built)
-            # if self.session_mode == SESSION_MODE_COUNTING:
+            # HRV section charts
+            self.hrv_tachogram_chart.add_rr(data.rr_intervals, current_time)
+            self.hrv_tachogram_chart.update_plot(current_time)
+            self.hrv_poincare_chart.add_rr(data.rr_intervals)
+            self.hrv_poincare_chart.update_plot()
+
+            # Feed RR intervals to counting game
             for rr in data.rr_intervals:
                 self.counting_game.feed_rr(rr)
+
+            # JSON recording — H10 is the active source
+            if self.is_json_recording and hasattr(self, '_session_recorder'):
+                for rr in data.rr_intervals:
+                    self._session_recorder.add_rr_interval(rr)
+
+        if self.is_json_recording and hasattr(self, '_session_recorder') and hr_val > 0:
+            self._session_recorder.add_hr_sample(int(hr_val))
 
         # Save to DB if recording
         if self.is_recording and self.current_session_id:
@@ -531,7 +638,7 @@ class UIManager:
                 dpg.set_value("hr_display", f"{hr_val:.1f} BPM")
                 if self.audio_enabled:
                     self.audio_feedback.update_hr(hr_val)
-                
+
                 # Feed HR to rapid change game
                 self.rapid_change_game.feed_hr(hr_val)
 
@@ -545,6 +652,9 @@ class UIManager:
                     dpg.set_axis_limits("bf_x_axis",
                                         max(0, current_time - 60), current_time + 5)
 
+                if self.is_json_recording and hasattr(self, '_session_recorder'):
+                    self._session_recorder.add_hr_sample(int(hr_val))
+
         if KEY_RMSSD in payload:
             self.current_rmssd = payload[KEY_RMSSD]
             dpg.set_value("rmssd_display", f"{self.current_rmssd:.1f} ms")
@@ -553,7 +663,7 @@ class UIManager:
             self.current_coherence = payload[KEY_COHERENCE]
             self.resonance_breathing.update_resonance_score(self.current_coherence)
 
-        # Metrics history
+        # H10-specific history charts
         self.rmssd_chart.add_data(current_time, self.current_rmssd)
         self.rmssd_chart.update_plot()
         self.sdnn_chart.add_data(current_time, 0.0)  # SDNN not in legacy payload
@@ -561,21 +671,36 @@ class UIManager:
         self.coherence_chart.add_data(current_time, self.current_coherence)
         self.coherence_chart.update_plot()
 
+        # HRV section charts (H10 source)
+        self.hrv_rmssd_chart.add_data(current_time, self.current_rmssd)
+        self.hrv_rmssd_chart.update_plot()
+        self.hrv_coherence_chart.add_data(current_time, self.current_coherence)
+        self.hrv_coherence_chart.update_plot()
+
         if 'rr_intervals' in payload and payload['rr_intervals']:
             rr_data = payload['rr_intervals']
             if not isinstance(rr_data, list):
                 rr_data = [rr_data]
             self.heartbeat_chart.add_beats(time.time(), rr_data, self.start_time)
             self.heartbeat_chart.update_plot(current_time)
-            self.tachogram_chart.add_rr(rr_data)
-            self.tachogram_chart.update_plot()
+            self.tachogram_chart.add_rr(rr_data, current_time)
+            self.tachogram_chart.update_plot(current_time)
             self.poincare_chart.add_rr(rr_data)
             self.poincare_chart.update_plot()
 
-            # Feed RR intervals to counting game (always active if built)
-            # if self.session_mode == SESSION_MODE_COUNTING:
+            # HRV section charts
+            self.hrv_tachogram_chart.add_rr(rr_data, current_time)
+            self.hrv_tachogram_chart.update_plot(current_time)
+            self.hrv_poincare_chart.add_rr(rr_data)
+            self.hrv_poincare_chart.update_plot()
+
+            # Feed RR intervals to counting game
             for rr in rr_data:
                 self.counting_game.feed_rr(rr)
+
+            if self.is_json_recording and hasattr(self, '_session_recorder'):
+                for rr in rr_data:
+                    self._session_recorder.add_rr_interval(rr)
 
     def handle_acc_data(self, batch: ACCBatch):
         """Handle accelerometer data from BLE."""
@@ -595,29 +720,17 @@ class UIManager:
     # --- Heartbeat Blink ---
 
     def _update_heartbeat_blink(self):
-        """Update the heartbeat indicator circle color each frame.
-
-        On blink: fill flashes red, then fades linearly back to black
-        over self._blink_duration seconds.  The external LED ball is
-        driven via blink() in process_incoming_data (once per beat).
-
-        Suppressed during counting-game counting phase to prevent
-        the user from using the visual cue to count heartbeats.
-        """
-        # Suppress blink while the counting game is actively counting
-        # if (self.session_mode == SESSION_MODE_COUNTING
+        """Update the heartbeat indicator circle color each frame."""
         if (self.counting_game.controller.state == "counting"):
             dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
             return
 
         elapsed = time.time() - self._blink_time
         if elapsed < self._blink_duration:
-            # Fade from 255 (red) → 0 (black) over the duration
             t = elapsed / self._blink_duration
             red = int(255 * (1.0 - t))
             dpg.configure_item("hb_blink_circle", fill=(red, 0, 0, 255))
         else:
-            # Resting state: black fill
             dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
 
     # --- BLE Control ---
@@ -729,7 +842,6 @@ class UIManager:
 
     def handle_connect_button(self):
         if not self.is_connected:
-            # Directly connect, no popup
             self.start_stream()
             dpg.set_value("status_text", "Connecting...")
             dpg.configure_item("status_text", color=(255, 255, 0))
@@ -750,52 +862,76 @@ class UIManager:
             dpg.configure_item("session_btn", label="Start Session")
 
     def handle_recording_toggle(self):
-        """Toggle JSON recording state."""
+        """Toggle JSON recording state.
+
+        Uses the Polar H10 as the data source if connected; falls back to the
+        Polar Verity Sense if it is streaming HR data.  The recording is driven
+        by data arriving in handle_processed_data / handle_data_update (H10) or
+        _poll_pvs (PVS fallback) — whichever is the active HRV source.
+        """
         if not self.is_json_recording:
-            # Start Recording
-            self.is_json_recording = True
-            dpg.configure_item("rec_btn", label="Stop")
-            dpg.set_value("rec_status_text", "Recording...")
-            try:
-                self.math_control_pipe.send(IPCMessage(MSG_CMD_START_RECORDING))
-            except Exception as e:
-                logger.error(f"Failed to send start recording command: {e}")
+            # Determine which source to use
+            if self.is_connected:
+                # H10 path: delegate to the signal-processor process
+                self.is_json_recording = True
+                dpg.configure_item("rec_btn", label="Stop")
+                dpg.set_value("rec_status_text", "Recording... (H10)")
+                try:
+                    self.math_control_pipe.send(IPCMessage(MSG_CMD_START_RECORDING))
+                except Exception as e:
+                    logger.error(f"Failed to send start recording command: {e}")
+            elif self._pvs_hr_streaming:
+                # PVS fallback path: record locally in the GUI process
+                from src.recording.session_recorder import SessionRecorder
+                self._session_recorder = SessionRecorder(
+                    device_name="Polar Verity Sense",
+                    device_id="",
+                )
+                self._session_recorder.start()
+                self.is_json_recording = True
+                dpg.configure_item("rec_btn", label="Stop")
+                dpg.set_value("rec_status_text", "Recording... (PVS)")
+                logger.info("JSON recording started via Polar Verity Sense")
+            else:
+                logger.warning("Recording requested but no HR source is active")
         else:
-            # Stop Recording
+            # Stop recording
             self.is_json_recording = False
             dpg.configure_item("rec_btn", label="Rec")
             dpg.set_value("rec_status_text", "")
-            try:
-                self.math_control_pipe.send(IPCMessage(MSG_CMD_STOP_RECORDING))
-            except Exception as e:
-                logger.error(f"Failed to send stop recording command: {e}")
+
+            if self.is_connected:
+                # H10 path: tell signal processor to stop
+                try:
+                    self.math_control_pipe.send(IPCMessage(MSG_CMD_STOP_RECORDING))
+                except Exception as e:
+                    logger.error(f"Failed to send stop recording command: {e}")
+            elif hasattr(self, '_session_recorder'):
+                # PVS path: finalise the local recorder
+                filepath = self._session_recorder.stop()
+                if filepath:
+                    logger.info(f"PVS recording saved to: {filepath}")
+                del self._session_recorder
 
     def select_recording_folder(self):
         """Open a directory selector dialog."""
-        # Dear PyGui's file dialog is a bit complex, using a simple input for now or a custom modal
-        # For simplicity in this iteration, we'll use a modal with an input text field
         if dpg.does_item_exist("folder_selection_modal"):
             dpg.delete_item("folder_selection_modal")
-        
-        with dpg.window(label="Select Recording Folder", modal=True, tag="folder_selection_modal", width=400, height=150):
+
+        with dpg.window(label="Select Recording Folder", modal=True,
+                        tag="folder_selection_modal", width=400, height=150):
             dpg.add_text("Enter full path to recording folder:")
             dpg.add_input_text(tag="recording_folder_input", default_value=".", width=-1)
             dpg.add_text("(Default is current directory)", color=(150, 150, 150))
-            
+
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Set", callback=self._set_recording_folder, width=80)
-                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("folder_selection_modal"), width=80)
+                dpg.add_button(label="Cancel",
+                               callback=lambda: dpg.delete_item("folder_selection_modal"),
+                               width=80)
 
     def _set_recording_folder(self):
         folder_path = dpg.get_value("recording_folder_input")
-        # In a real app, we'd validate the path here
-        # For now, we just send it to the signal processor (if we had a message for it)
-        # or update the SessionRecorder config.
-        # Since SessionRecorder is in a different process, we need an IPC message.
-        # However, the requirements said "Add a setting to choose the recording folder".
-        # We'll assume for now we just log it or would send it if we added a SET_CONFIG message.
-        # Given the constraints, we'll just log it as a placeholder for the actual implementation
-        # which would require updating IPC messages further.
         logger.info(f"Recording folder set to: {folder_path}")
         dpg.delete_item("folder_selection_modal")
 
@@ -812,8 +948,8 @@ class UIManager:
                             dpg.configure_item("status_text", color=(0, 255, 0))
                             dpg.configure_item("connect_btn", label="Disconnect")
                             dpg.configure_item("session_btn", show=True)
-                            # Show Polar H10 graphs subsection
                             dpg.configure_item("header_polar_h10", show=True)
+                            self._update_hrv_source()
                         elif status == "disconnected":
                             self.is_connected = False
                             dpg.set_value("status_text", "Disconnected")
@@ -821,19 +957,13 @@ class UIManager:
                             dpg.configure_item("connect_btn", label="Connect")
                             dpg.configure_item("session_btn", show=False)
                             self.is_recording = False
-                            # Hide Polar H10 graphs subsection
                             dpg.configure_item("header_polar_h10", show=False)
+                            self._update_hrv_source()
                         elif status == "reconnecting":
-                            # Auto-reconnect in progress — keep session alive,
-                            # show yellow status, keep Disconnect button available
                             self.is_connected = False
                             dpg.set_value("status_text", "Reconnecting...")
                             dpg.configure_item("status_text", color=(255, 165, 0))
                             dpg.configure_item("connect_btn", label="Disconnect")
-                            # Don't hide session_btn or reset is_recording —
-                            # the session recorder keeps accumulating data and
-                            # will resume when the device reconnects.
-                            # Keep Polar H10 graphs visible during reconnect
                     if "battery" in msg:
                         dpg.set_value("battery_text", f"{msg['battery']}%")
         except Exception as e:
@@ -859,19 +989,93 @@ class UIManager:
     def _poll_pvs(self):
         """Poll the Polar Verity Sense manager for status and data each frame."""
         self.pvs_bar.poll_status()
+        # Keep HRV source in sync with PVS connection state each frame
+        self._update_hrv_source()
 
         samples = self.pvs_manager.poll()
-        if samples:
-            self.pvs_acc_chart.add_samples(samples)
-            self.pvs_acc_chart.update_plot()
-            self.pvs_gyro_chart.add_samples(samples)
-            self.pvs_gyro_chart.update_plot()
-            self.pvs_mag_chart.add_samples(samples)
-            self.pvs_mag_chart.update_plot()
-            self.pvs_ppi_chart.add_samples(samples)
-            self.pvs_ppi_chart.update_plot()
-            self.pvs_hr_chart.add_samples(samples)
-            self.pvs_hr_chart.update_plot()
+        if not samples:
+            return
+
+        # Always update PVS device charts
+        self.pvs_acc_chart.add_samples(samples)
+        self.pvs_acc_chart.update_plot()
+        self.pvs_gyro_chart.add_samples(samples)
+        self.pvs_gyro_chart.update_plot()
+        self.pvs_mag_chart.add_samples(samples)
+        self.pvs_mag_chart.update_plot()
+        self.pvs_ppi_chart.add_samples(samples)
+        self.pvs_ppi_chart.update_plot()
+        self.pvs_hr_chart.add_samples(samples)
+        self.pvs_hr_chart.update_plot()
+
+        # When PVS is the active HRV source (H10 not connected and PVS streaming HR),
+        # feed HR/PPI data into the HRV section charts and top-bar metrics.
+        pvs_is_active_hrv = not self.is_connected and self._pvs_is_streaming_hr()
+        if pvs_is_active_hrv:
+            # Ensure _hrv_source is set (may not be set yet on first frame)
+            if self._hrv_source != "pvs":
+                self._hrv_source = "pvs"
+                self._refresh_hrv_section_visibility()
+
+            current_time = time.time() - self.start_time
+            for s in samples:
+                # Derive HR from PPI or BLE HR service
+                hr = s.ppi_hr if (s.ppi_hr is not None and s.ppi_hr != 0) else s.hr_bpm
+                if hr is not None and hr > 0:
+                    self.current_bpm = hr
+                    dpg.set_value("hr_display", f"{hr:.0f} BPM")
+                    if self.audio_enabled:
+                        self.audio_feedback.update_hr(hr)
+                    self.rapid_change_game.feed_hr(hr)
+
+                    # JSON recording via PVS
+                    if self.is_json_recording and hasattr(self, '_session_recorder'):
+                        self._session_recorder.add_hr_sample(int(hr))
+
+                # Feed PPI as RR intervals into HRV charts
+                if s.ppi_ms is not None and 300 < s.ppi_ms < 2000:
+                    rr = float(s.ppi_ms)
+                    self.hrv_tachogram_chart.add_rr([rr], current_time)
+                    self.hrv_poincare_chart.add_rr([rr])
+                    self.counting_game.feed_rr(rr)
+
+                    if self.is_json_recording and hasattr(self, '_session_recorder'):
+                        self._session_recorder.add_rr_interval(rr)
+
+            self.hrv_tachogram_chart.update_plot(current_time)
+            self.hrv_poincare_chart.update_plot()
+
+            # Compute simple rolling RMSSD/SDNN from PPI data for top-bar display
+            self._update_hrv_metrics_from_pvs_ppi(samples, current_time)
+
+    def _update_hrv_metrics_from_pvs_ppi(self, samples, current_time: float):
+        """Compute and display RMSSD/SDNN from recent PPI samples (PVS fallback).
+
+        Uses a simple rolling buffer of the last 60 PPI values.
+        """
+        if not hasattr(self, '_pvs_ppi_buffer'):
+            self._pvs_ppi_buffer: deque = deque(maxlen=60)
+
+        for s in samples:
+            if s.ppi_ms is not None and 300 < s.ppi_ms < 2000:
+                self._pvs_ppi_buffer.append(float(s.ppi_ms))
+
+        if len(self._pvs_ppi_buffer) < 3:
+            return
+
+        arr = np.array(list(self._pvs_ppi_buffer))
+        diffs = np.diff(arr)
+        rmssd = float(np.sqrt(np.mean(diffs ** 2)))
+        sdnn = float(np.std(arr))
+
+        self.current_rmssd = rmssd
+        dpg.set_value("rmssd_display", f"{rmssd:.1f} ms")
+        dpg.set_value("sdnn_display", f"{sdnn:.1f} ms")
+
+        self.hrv_rmssd_chart.add_data(current_time, rmssd)
+        self.hrv_rmssd_chart.update_plot()
+        self.hrv_sdnn_chart.add_data(current_time, sdnn)
+        self.hrv_sdnn_chart.update_plot()
 
     # --- Presets ---
 

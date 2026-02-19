@@ -11,7 +11,7 @@ Keeps the bar logic separate from the main UIManager for modularity.
 
 import dearpygui.dearpygui as dpg
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.ble.pvs_manager import PolarVeritySenseManager
@@ -25,6 +25,9 @@ class PolarVeritySenseBar:
     def __init__(self, manager: 'PolarVeritySenseManager'):
         self.manager = manager
         self._prev_status = ""
+        # Called with (is_streaming_hr: bool) when HR streaming state changes
+        self.on_hr_streaming_changed: Optional[Callable[[bool], None]] = None
+        self._prev_hr_streaming = False
 
     def build(self):
         """Build the PVS top bar. Call inside a dpg.window context."""
@@ -89,28 +92,34 @@ class PolarVeritySenseBar:
     def poll_status(self):
         """Poll the manager status and update UI. Call each frame."""
         status = self.manager.status_message
-        if status == self._prev_status:
-            return
-        self._prev_status = status
 
-        dpg.set_value("pvs_status_text", status)
+        # Detect whether PVS is actively streaming HR data.
+        # HR is streaming when connected and the status message contains "HR"
+        # (set by the manager when the HR notification subscription succeeds).
+        is_hr_streaming = self.manager.connected and "HR" in status
 
-        if self.manager.connected:
-            dpg.configure_item("pvs_status_text", color=(0, 255, 0))
-            dpg.configure_item("pvs_connect_btn", label="Disconnect")
-            # Disable stream toggles while connected
-            self._set_toggles_enabled(False)
-            # Show PVS graphs subsection
-            if dpg.does_item_exist("header_pvs"):
-                dpg.configure_item("header_pvs", show=True)
-        elif self.manager.connecting:
-            dpg.configure_item("pvs_status_text", color=(255, 255, 0))
-            dpg.configure_item("pvs_connect_btn", label="Cancel")
-        else:
-            dpg.configure_item("pvs_status_text", color=(255, 0, 0))
-            dpg.configure_item("pvs_connect_btn", label="Connect")
-            # Re-enable stream toggles when disconnected
-            self._set_toggles_enabled(True)
-            # Hide PVS graphs subsection
-            if dpg.does_item_exist("header_pvs"):
-                dpg.configure_item("header_pvs", show=False)
+        if status != self._prev_status:
+            self._prev_status = status
+            dpg.set_value("pvs_status_text", status)
+
+            if self.manager.connected:
+                dpg.configure_item("pvs_status_text", color=(0, 255, 0))
+                dpg.configure_item("pvs_connect_btn", label="Disconnect")
+                self._set_toggles_enabled(False)
+                if dpg.does_item_exist("header_pvs"):
+                    dpg.configure_item("header_pvs", show=True)
+            elif self.manager.connecting:
+                dpg.configure_item("pvs_status_text", color=(255, 255, 0))
+                dpg.configure_item("pvs_connect_btn", label="Cancel")
+            else:
+                dpg.configure_item("pvs_status_text", color=(255, 0, 0))
+                dpg.configure_item("pvs_connect_btn", label="Connect")
+                self._set_toggles_enabled(True)
+                if dpg.does_item_exist("header_pvs"):
+                    dpg.configure_item("header_pvs", show=False)
+
+        # Fire HR streaming callback when state changes
+        if is_hr_streaming != self._prev_hr_streaming:
+            self._prev_hr_streaming = is_hr_streaming
+            if self.on_hr_streaming_changed is not None:
+                self.on_hr_streaming_changed(is_hr_streaming)

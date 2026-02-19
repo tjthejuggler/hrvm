@@ -92,11 +92,15 @@ class HeartbeatChart(CollapsibleChart):
 
 
 class TachogramChart(CollapsibleChart):
-    """RR Interval Tachogram."""
+    """RR Interval Tachogram — scrolling ~60s window."""
 
     def __init__(self):
         super().__init__("RR Tachogram", "tachogram", default_open=False)
-        self.rr_history: deque = deque(maxlen=600)
+        # ~60s at ~1 beat/sec = ~60 beats; use 120 for safety
+        self.max_beats = 120
+        self.rr_times: deque = deque(maxlen=self.max_beats)
+        self.rr_history: deque = deque(maxlen=self.max_beats)
+        self._start_time: Optional[float] = None
 
     def build(self, parent):
         with dpg.tree_node(
@@ -104,31 +108,37 @@ class TachogramChart(CollapsibleChart):
             default_open=self.default_open
         ):
             with dpg.plot(label="RR Interval Tachogram", height=200, width=-1):
-                dpg.add_plot_axis(dpg.mvXAxis, label="Beat #", tag="rr_x_axis")
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="rr_x_axis")
                 with dpg.plot_axis(dpg.mvYAxis, label="RR (ms)", tag="rr_y_axis"):
                     dpg.add_line_series([], [], label="RR Intervals", tag="rr_series")
 
-    def add_rr(self, rr_intervals: List[float]):
+    def add_rr(self, rr_intervals: List[float], current_time: Optional[float] = None):
+        t = current_time if current_time is not None else 0.0
         for rr in rr_intervals:
             if 300 < rr < 2000:
+                self.rr_times.append(t)
                 self.rr_history.append(rr)
 
-    def update_plot(self):
+    def update_plot(self, current_time: Optional[float] = None):
         if len(self.rr_history) == 0:
             return
-        indices = list(range(len(self.rr_history)))
-        dpg.set_value("rr_series", [indices, list(self.rr_history)])
-        dpg.fit_axis_data("rr_x_axis")
+        t = list(self.rr_times)
+        dpg.set_value("rr_series", [t, list(self.rr_history)])
+        if current_time is not None:
+            dpg.set_axis_limits("rr_x_axis", max(0, current_time - 60), current_time + 5)
+        else:
+            dpg.fit_axis_data("rr_x_axis")
         dpg.fit_axis_data("rr_y_axis")
 
 
 class PoincareChart(CollapsibleChart):
-    """Poincaré Plot (RR_n vs RR_n+1)."""
+    """Poincaré Plot (RR_n vs RR_n+1) — rolling ~60-beat window."""
 
     def __init__(self):
         super().__init__("Poincaré Plot", "poincare", default_open=False)
-        self.px: deque = deque(maxlen=600)
-        self.py: deque = deque(maxlen=600)
+        # Keep last ~120 pairs (~60-120s of data)
+        self.px: deque = deque(maxlen=120)
+        self.py: deque = deque(maxlen=120)
         self._last_rr = None
 
     def build(self, parent):
@@ -158,7 +168,7 @@ class PoincareChart(CollapsibleChart):
 
 
 class RMSSDHistoryChart(CollapsibleChart):
-    """RMSSD history chart (full-width, collapsible)."""
+    """RMSSD history chart — scrolling ~60s window."""
 
     def __init__(self):
         super().__init__("RMSSD History", "rmssd_hist", default_open=False)
@@ -186,12 +196,13 @@ class RMSSDHistoryChart(CollapsibleChart):
         t = list(self.time_history)
         min_len = min(len(t), len(self.rmssd_history))
         dpg.set_value("rmssd_series", [t[-min_len:], list(self.rmssd_history)[-min_len:]])
-        dpg.fit_axis_data("rmssd_x_axis")
+        latest = t[-1]
+        dpg.set_axis_limits("rmssd_x_axis", max(0, latest - 60), latest + 5)
         dpg.fit_axis_data("rmssd_y_axis")
 
 
 class SDNNHistoryChart(CollapsibleChart):
-    """SDNN history chart (full-width, collapsible)."""
+    """SDNN history chart — scrolling ~60s window."""
 
     def __init__(self):
         super().__init__("SDNN History", "sdnn_hist", default_open=False)
@@ -219,12 +230,13 @@ class SDNNHistoryChart(CollapsibleChart):
         t = list(self.time_history)
         min_len = min(len(t), len(self.sdnn_history))
         dpg.set_value("sdnn_series", [t[-min_len:], list(self.sdnn_history)[-min_len:]])
-        dpg.fit_axis_data("sdnn_x_axis")
+        latest = t[-1]
+        dpg.set_axis_limits("sdnn_x_axis", max(0, latest - 60), latest + 5)
         dpg.fit_axis_data("sdnn_y_axis")
 
 
 class CoherenceHistoryChart(CollapsibleChart):
-    """Coherence score history chart (full-width, collapsible)."""
+    """Coherence score history chart — scrolling ~60s window."""
 
     def __init__(self):
         super().__init__("Coherence History", "coherence_hist", default_open=False)
@@ -252,8 +264,186 @@ class CoherenceHistoryChart(CollapsibleChart):
         t = list(self.time_history)
         min_len = min(len(t), len(self.coherence_history))
         dpg.set_value("coherence_series", [t[-min_len:], list(self.coherence_history)[-min_len:]])
-        dpg.fit_axis_data("coherence_x_axis")
+        latest = t[-1]
+        dpg.set_axis_limits("coherence_x_axis", max(0, latest - 60), latest + 5)
         dpg.fit_axis_data("coherence_y_axis")
+
+
+# ---------------------------------------------------------------------------
+# HRV Section Charts
+# These are device-agnostic HRV charts shown in the dedicated HRV section.
+# They receive data from whichever HR source is active (H10 preferred, PVS fallback).
+# All use a ~60s scrolling window.
+# ---------------------------------------------------------------------------
+
+class HRVTachogramChart(CollapsibleChart):
+    """HRV Tachogram — RR intervals over time, scrolling ~60s window."""
+
+    def __init__(self):
+        super().__init__("RR Tachogram", "hrv_tachogram", default_open=True)
+        self.max_beats = 120
+        self.rr_times: deque = deque(maxlen=self.max_beats)
+        self.rr_history: deque = deque(maxlen=self.max_beats)
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="RR Interval Tachogram", height=200, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="hrv_rr_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="RR (ms)", tag="hrv_rr_y_axis"):
+                    dpg.add_line_series([], [], label="RR Intervals", tag="hrv_rr_series")
+
+    def add_rr(self, rr_intervals: List[float], current_time: float):
+        for rr in rr_intervals:
+            if 300 < rr < 2000:
+                self.rr_times.append(current_time)
+                self.rr_history.append(rr)
+
+    def update_plot(self, current_time: float):
+        if not self.rr_history:
+            return
+        dpg.set_value("hrv_rr_series", [list(self.rr_times), list(self.rr_history)])
+        dpg.set_axis_limits("hrv_rr_x_axis", max(0, current_time - 60), current_time + 5)
+        dpg.fit_axis_data("hrv_rr_y_axis")
+
+
+class HRVPoincareChart(CollapsibleChart):
+    """HRV Poincaré Plot — rolling ~60-beat window."""
+
+    def __init__(self):
+        super().__init__("Poincaré Plot", "hrv_poincare", default_open=False)
+        self.px: deque = deque(maxlen=120)
+        self.py: deque = deque(maxlen=120)
+        self._last_rr: Optional[float] = None
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="Poincaré Plot", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="RR_n (ms)", tag="hrv_poincare_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="RR_n+1 (ms)",
+                                   tag="hrv_poincare_y_axis"):
+                    dpg.add_scatter_series([], [], label="RR Pairs",
+                                           tag="hrv_poincare_series")
+
+    def add_rr(self, rr_intervals: List[float]):
+        for rr in rr_intervals:
+            if 300 < rr < 2000:
+                if self._last_rr is not None:
+                    self.px.append(self._last_rr)
+                    self.py.append(rr)
+                self._last_rr = rr
+
+    def update_plot(self):
+        if not self.px:
+            return
+        dpg.set_value("hrv_poincare_series", [list(self.px), list(self.py)])
+        dpg.fit_axis_data("hrv_poincare_x_axis")
+        dpg.fit_axis_data("hrv_poincare_y_axis")
+
+
+class HRVRMSSDChart(CollapsibleChart):
+    """HRV RMSSD history — scrolling ~60s window."""
+
+    def __init__(self):
+        super().__init__("RMSSD History", "hrv_rmssd", default_open=True)
+        self.time_history: deque = deque(maxlen=600)
+        self.rmssd_history: deque = deque(maxlen=600)
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="RMSSD History", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="hrv_rmssd_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="RMSSD (ms)", tag="hrv_rmssd_y_axis"):
+                    dpg.add_line_series([], [], label="RMSSD", tag="hrv_rmssd_series")
+
+    def add_data(self, current_time: float, rmssd: float):
+        self.time_history.append(current_time)
+        self.rmssd_history.append(rmssd)
+
+    def update_plot(self):
+        if not self.time_history:
+            return
+        t = list(self.time_history)
+        min_len = min(len(t), len(self.rmssd_history))
+        dpg.set_value("hrv_rmssd_series", [t[-min_len:], list(self.rmssd_history)[-min_len:]])
+        latest = t[-1]
+        dpg.set_axis_limits("hrv_rmssd_x_axis", max(0, latest - 60), latest + 5)
+        dpg.fit_axis_data("hrv_rmssd_y_axis")
+
+
+class HRVSDNNChart(CollapsibleChart):
+    """HRV SDNN history — scrolling ~60s window."""
+
+    def __init__(self):
+        super().__init__("SDNN History", "hrv_sdnn", default_open=False)
+        self.time_history: deque = deque(maxlen=600)
+        self.sdnn_history: deque = deque(maxlen=600)
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="SDNN History", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="hrv_sdnn_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="SDNN (ms)", tag="hrv_sdnn_y_axis"):
+                    dpg.add_line_series([], [], label="SDNN", tag="hrv_sdnn_series")
+
+    def add_data(self, current_time: float, sdnn: float):
+        self.time_history.append(current_time)
+        self.sdnn_history.append(sdnn)
+
+    def update_plot(self):
+        if not self.time_history:
+            return
+        t = list(self.time_history)
+        min_len = min(len(t), len(self.sdnn_history))
+        dpg.set_value("hrv_sdnn_series", [t[-min_len:], list(self.sdnn_history)[-min_len:]])
+        latest = t[-1]
+        dpg.set_axis_limits("hrv_sdnn_x_axis", max(0, latest - 60), latest + 5)
+        dpg.fit_axis_data("hrv_sdnn_y_axis")
+
+
+class HRVCoherenceChart(CollapsibleChart):
+    """HRV Coherence score history — scrolling ~60s window."""
+
+    def __init__(self):
+        super().__init__("Coherence History", "hrv_coherence", default_open=False)
+        self.time_history: deque = deque(maxlen=600)
+        self.coherence_history: deque = deque(maxlen=600)
+
+    def build(self, parent):
+        with dpg.tree_node(
+            label=self.label, parent=parent, tag=self.node_tag,
+            default_open=self.default_open
+        ):
+            with dpg.plot(label="Coherence History", height=250, width=-1):
+                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="hrv_coherence_x_axis")
+                with dpg.plot_axis(dpg.mvYAxis, label="Score", tag="hrv_coherence_y_axis"):
+                    dpg.add_line_series([], [], label="Coherence", tag="hrv_coherence_series")
+
+    def add_data(self, current_time: float, coherence: float):
+        self.time_history.append(current_time)
+        self.coherence_history.append(coherence)
+
+    def update_plot(self):
+        if not self.time_history:
+            return
+        t = list(self.time_history)
+        min_len = min(len(t), len(self.coherence_history))
+        dpg.set_value("hrv_coherence_series",
+                      [t[-min_len:], list(self.coherence_history)[-min_len:]])
+        latest = t[-1]
+        dpg.set_axis_limits("hrv_coherence_x_axis", max(0, latest - 60), latest + 5)
+        dpg.fit_axis_data("hrv_coherence_y_axis")
 
 
 class ACCChart(CollapsibleChart):
