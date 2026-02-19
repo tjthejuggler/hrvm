@@ -165,7 +165,7 @@ class UIManager:
         with dpg.font_registry():
             dpg.add_font(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                size=28,
+                size=40,
                 tag="large_font"
             )
 
@@ -183,11 +183,8 @@ class UIManager:
             self.pvs_bar.build()
             dpg.add_separator()
 
-            # --- Main Layout ---
-            with dpg.group(horizontal=True, height=200):
-                self._build_left_panel()
-                self._build_right_panel()
-
+            # --- Session Metrics Bar (large numbers, horizontal) ---
+            self._build_metrics_bar()
             dpg.add_separator()
 
             # --- Charts Section (collapsible, no tabs) ---
@@ -296,8 +293,7 @@ class UIManager:
                            callback=self.handle_connect_button, width=100)
             dpg.add_button(label="Start Session", tag="session_btn",
                            callback=self.handle_session_toggle, show=False, width=120)
-            
-            # New Recording Button
+
             dpg.add_spacer(width=10)
             dpg.add_button(label="Rec", tag="rec_btn",
                            callback=self.handle_recording_toggle, width=60)
@@ -306,66 +302,81 @@ class UIManager:
             dpg.add_button(label="History", callback=self.create_history_window, width=80)
             dpg.add_checkbox(label="Audio Feedback", callback=self.toggle_audio,
                              default_value=False)
-            
-            # Recording Folder Selection
             dpg.add_spacer(width=20)
-            dpg.add_button(label="Set Rec Folder", callback=self.select_recording_folder, width=100)
+            dpg.add_button(label="⚙ Settings", callback=self.open_settings_popup, width=100)
 
-    def _build_left_panel(self):
-        with dpg.child_window(width=280, height=-1, border=True):
-            dpg.add_text("Session Metrics", color=(0, 255, 255))
+    def _build_metrics_bar(self):
+        """Horizontal bar of large session metric numbers."""
+        with dpg.group(horizontal=True):
+            # Heart Rate
+            with dpg.group():
+                dpg.add_text("HEART RATE", color=(150, 150, 150))
+                with dpg.group(horizontal=True):
+                    dpg.add_text("0 BPM", tag="hr_display", color=(255, 80, 80))
+                    dpg.bind_item_font("hr_display", "large_font")
+                    dpg.add_spacer(width=8)
+                    with dpg.drawlist(width=28, height=28, tag="hb_blink_drawlist"):
+                        dpg.draw_circle(center=(14, 14), radius=10,
+                                        color=(255, 255, 255, 255),
+                                        fill=(0, 0, 0, 255),
+                                        tag="hb_blink_circle")
+
+            dpg.add_spacer(width=60)
+
+            # RMSSD
+            with dpg.group():
+                dpg.add_text("RMSSD", color=(150, 150, 150))
+                dpg.add_text("0 ms", tag="rmssd_display", color=(0, 255, 0))
+                dpg.bind_item_font("rmssd_display", "large_font")
+
+            dpg.add_spacer(width=60)
+
+            # SDNN
+            with dpg.group():
+                dpg.add_text("SDNN", color=(150, 150, 150))
+                dpg.add_text("0 ms", tag="sdnn_display", color=(255, 255, 0))
+                dpg.bind_item_font("sdnn_display", "large_font")
+
+            dpg.add_spacer(width=60)
+
+            # Signal Quality
+            with dpg.group():
+                dpg.add_text("SIGNAL QUALITY", color=(150, 150, 150))
+                dpg.add_progress_bar(tag="quality_bar", default_value=0.0, width=200)
+
+    def open_settings_popup(self):
+        """Open a modal settings window with Presets and LED Ball controls."""
+        if dpg.does_item_exist("settings_popup"):
+            dpg.delete_item("settings_popup")
+        with dpg.window(label="Settings", modal=True, tag="settings_popup",
+                        width=380, height=320, no_resize=True):
+            dpg.add_text("Presets", color=(0, 255, 255))
             dpg.add_separator()
-
-            # Heart Rate — large
-            dpg.add_text("HEART RATE", color=(150, 150, 150))
+            dpg.add_input_text(tag="preset_name_input", width=200, hint="Preset Name")
             with dpg.group(horizontal=True):
-                dpg.add_text("0 BPM", tag="hr_display", color=(255, 80, 80))
-                dpg.bind_item_font("hr_display", "large_font")
-                dpg.add_spacer(width=8)
-                with dpg.drawlist(width=24, height=24, tag="hb_blink_drawlist"):
-                    dpg.draw_circle(center=(12, 12), radius=9,
-                                    color=(255, 255, 255, 255),
-                                    fill=(0, 0, 0, 255),
-                                    tag="hb_blink_circle")
-            dpg.add_spacer(height=8)
+                dpg.add_button(label="Save", callback=self.handle_save_preset, width=80)
+                dpg.add_button(label="Load", callback=self.create_load_preset_window, width=80)
 
-            # RMSSD — large
-            dpg.add_text("RMSSD", color=(150, 150, 150))
-            dpg.add_text("0 ms", tag="rmssd_display", color=(0, 255, 0))
-            dpg.bind_item_font("rmssd_display", "large_font")
-            dpg.add_spacer(height=8)
-
-            # SDNN — large
-            dpg.add_text("SDNN", color=(150, 150, 150))
-            dpg.add_text("0 ms", tag="sdnn_display", color=(255, 255, 0))
-            dpg.bind_item_font("sdnn_display", "large_font")
-            dpg.add_spacer(height=8)
-
-            dpg.add_text("Signal Quality", color=(150, 150, 150))
-            dpg.add_progress_bar(tag="quality_bar", default_value=0.0, width=-1)
-
-            dpg.add_spacer(height=10)
+            dpg.add_spacer(height=14)
+            dpg.add_text("LED Ball", color=(0, 255, 255))
             dpg.add_separator()
-            dpg.add_text("Presets")
-            dpg.add_input_text(tag="preset_name_input", width=150, hint="Preset Name")
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Save", callback=self.handle_save_preset, width=70)
-                dpg.add_button(label="Load", callback=self.create_load_preset_window,
-                               width=70)
-
-            dpg.add_spacer(height=10)
-            dpg.add_separator()
-            dpg.add_text("LED Ball")
             dpg.add_checkbox(label="Enable LED Ball", tag="led_ball_checkbox",
                              default_value=False, callback=self._toggle_led_ball)
             dpg.add_input_text(label="IP", tag="led_ball_ip_input",
-                               default_value=self.led_ball.ip, width=150,
+                               default_value=self.led_ball.ip, width=180,
                                callback=self._update_led_ball_ip,
                                on_enter=True)
 
-    def _build_right_panel(self):
-        # Right panel removed — metrics are now in the left panel
-        pass
+            dpg.add_spacer(height=14)
+            dpg.add_text("Recording", color=(0, 255, 255))
+            dpg.add_separator()
+            dpg.add_button(label="Set Rec Folder",
+                           callback=self.select_recording_folder, width=140)
+
+            dpg.add_spacer(height=14)
+            dpg.add_button(label="Close",
+                           callback=lambda: dpg.delete_item("settings_popup"),
+                           width=-1)
 
     # --- Main Loop ---
 
