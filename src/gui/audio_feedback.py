@@ -6,6 +6,43 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def play_beep(frequency: float, duration: float, volume: float = 0.6,
+              sample_rate: int = 44100) -> None:
+    """Play a single beep tone in a background thread (non-blocking).
+
+    Args:
+        frequency: Tone frequency in Hz.
+        duration:  Duration in seconds.
+        volume:    Amplitude 0.0–1.0.
+        sample_rate: Audio sample rate.
+    """
+    def _play():
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        # Sine wave with a short linear fade-in/out to avoid clicks
+        wave = volume * np.sin(2 * np.pi * frequency * t)
+        fade_samples = min(int(sample_rate * 0.02), len(wave) // 4)  # 20 ms fade
+        wave[:fade_samples] *= np.linspace(0, 1, fade_samples)
+        wave[-fade_samples:] *= np.linspace(1, 0, fade_samples)
+        try:
+            sd.play(wave.astype(np.float32), samplerate=sample_rate)
+            sd.wait()
+        except Exception as e:
+            logger.warning(f"play_beep failed: {e}")
+
+    threading.Thread(target=_play, daemon=True).start()
+
+
+def play_end_beep() -> None:
+    """Long beep indicating the end target HR has been reached."""
+    play_beep(frequency=880.0, duration=1.0, volume=0.7)
+
+
+def play_peak_beep() -> None:
+    """Short beep indicating the peak HR has been reached (return mode)."""
+    play_beep(frequency=660.0, duration=0.3, volume=0.6)
+
+
 class AudioFeedback:
     def __init__(self, sample_rate=44100):
         self.sample_rate = sample_rate

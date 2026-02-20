@@ -5,6 +5,15 @@ The user configures a start HR and end HR, selects a mode (one_way or return),
 then races to change their heart rate as fast as possible. Results are persisted
 to a JSON file and displayed on a bar chart showing completion times for games
 played with the exact same configuration.
+
+Settings include:
+  - mode: one_way | return
+  - start_hr / end_hr (or peak HR in return mode)
+  - breathing_only: if checked, only games with breathing_only=True are shown in the chart
+
+Session-end guards:
+  - All threshold crossings require 5 consecutive readings beyond the target
+    before the condition is considered met, to avoid false triggers from noisy data.
 """
 import json
 import os
@@ -12,12 +21,16 @@ import time
 import logging
 import dearpygui.dearpygui as dpg
 from typing import List, Dict, Any, Optional, Callable
+from src.gui.audio_feedback import play_end_beep, play_peak_beep
 
 logger = logging.getLogger(__name__)
 
 # --- Persistent data store (JSON file) ---
 
 RC_DATA_FILE = "rapid_change_data.json"
+
+# Number of consecutive readings required to confirm a threshold crossing
+CONFIRM_READINGS = 5
 
 
 def load_rc_history(filepath: str = RC_DATA_FILE) -> List[Dict[str, Any]]:
@@ -44,9 +57,9 @@ def save_rc_entry(entry: Dict[str, Any], filepath: str = RC_DATA_FILE) -> None:
         logger.error(f"Failed to save rapid change data: {e}")
 
 
-def config_key(mode: str, start_hr: int, end_hr: int) -> str:
+def config_key(mode: str, start_hr: int, end_hr: int, breathing_only: bool) -> str:
     """Create a unique string key for a game configuration."""
-    return f"{mode}|{start_hr}|{end_hr}"
+    return f"{mode}|{start_hr}|{end_hr}|{int(breathing_only)}"
 
 
 def get_unique_configs(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -54,24 +67,28 @@ def get_unique_configs(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set()
     configs = []
     for entry in history:
-        key = config_key(entry["mode"], entry["start_hr"], entry["end_hr"])
+        bo = entry.get("breathing_only", False)
+        key = config_key(entry["mode"], entry["start_hr"], entry["end_hr"], bo)
         if key not in seen:
             seen.add(key)
             configs.append({
                 "mode": entry["mode"],
                 "start_hr": entry["start_hr"],
                 "end_hr": entry["end_hr"],
+                "breathing_only": bo,
             })
     return configs
 
 
 def get_times_for_config(history: List[Dict[str, Any]], mode: str,
-                         start_hr: int, end_hr: int) -> List[float]:
+                         start_hr: int, end_hr: int,
+                         breathing_only: bool) -> List[float]:
     """Get all completion times for a specific configuration."""
     times = []
     for entry in history:
+        entry_bo = entry.get("breathing_only", False)
         if (entry["mode"] == mode and entry["start_hr"] == start_hr
-                and entry["end_hr"] == end_hr):
+                and entry["end_hr"] == end_hr and entry_bo == breathing_only):
             times.append(entry["elapsed_s"])
     return times
 
@@ -87,6 +104,10 @@ class RapidChangeController:
         racing    – timer running, user is trying to reach target HR
         returning – (return mode only) user reached peak, now returning to start
         finished  – round complete, showing results
+
+    All threshold crossings require CONFIRM_READINGS consecutive readings
+    beyond the target before the condition is confirmed, preventing false
+    triggers from noisy sensor data.
     """
 
     def __init__(self):
@@ -94,17 +115,25 @@ class RapidChangeController:
         self.mode = "one_way"  # one_way | return
         self.start_hr: int = 60
         self.end_hr: int = 100
+        self.breathing_only: bool = False
         self._start_time: float = 0.0
         self._peak_reached_time: float = 0.0
         self._current_hr: float = 0.0
         self._direction: str = "up"  # up | down (derived from start/end)
         self._peak_reached: bool = False
 
-    def configure(self, mode: str, start_hr: int, end_hr: int) -> None:
+        # Consecutive-reading counters for each threshold guard
+        self._end_confirm_count: int = 0    # one_way: readings past end_hr
+        self._peak_confirm_count: int = 0   # return racing: readings past peak
+        self._return_confirm_count: int = 0 # return returning: readings past start
+
+    def configure(self, mode: str, start_hr: int, end_hr: int,
+                  breathing_only: bool = False) -> None:
         """Set game configuration."""
         self.mode = mode
         self.start_hr = start_hr
         self.end_hr = end_hr
+        self.breathing_only = breathing_only
         if mode == "return":
             # In return mode, end_hr is the peak; direction is always up then down
             self._direction = "up"
@@ -157,10 +186,11 @@ class RapidChangeController:
         self._start_time = time.time()
         self._peak_reached = False
         self._peak_reached_time = 0.0
-        if self.mode == "return":
-            self.state = "racing"  # racing to peak
-        else:
-            self.state = "racing"
+        # Reset all confirmation counters
+        self._end_confirm_count = 0
+        self._peak_confirm_count = 0
+        self._return_confirm_count = 0
+        self.state = "racing"
         return True
 
     def update_hr(self, hr: float) -> None:
@@ -179,25 +209,50 @@ class RapidChangeController:
         return None
 
     def _tick_one_way(self) -> Optional[Dict[str, Any]]:
-        """Check if target HR reached in one_way mode."""
-        if self._direction == "up" and self._current_hr >= self.end_hr:
-            return self._finish()
-        elif self._direction == "down" and self._current_hr <= self.end_hr:
-            return self._finish()
+        """Check if target HR reached in one_way mode.
+
+        Requires CONFIRM_READINGS consecutive readings beyond end_hr.
+        """
+        beyond = (
+            (self._direction == "up" and self._current_hr >= self.end_hr) or
+            (self._direction == "down" and self._current_hr <= self.end_hr)
+        )
+        if beyond:
+            self._end_confirm_count += 1
+            if self._end_confirm_count >= CONFIRM_READINGS:
+                return self._finish()
+        else:
+            self._end_confirm_count = 0
         return None
 
     def _tick_return_racing(self) -> Optional[Dict[str, Any]]:
-        """Check if peak HR reached in return mode."""
+        """Check if peak HR reached in return mode.
+
+        Requires CONFIRM_READINGS consecutive readings at or above end_hr.
+        """
         if self._current_hr >= self.end_hr:
-            self._peak_reached = True
-            self._peak_reached_time = time.time()
-            self.state = "returning"
+            self._peak_confirm_count += 1
+            if self._peak_confirm_count >= CONFIRM_READINGS:
+                self._peak_reached = True
+                self._peak_reached_time = time.time()
+                self._return_confirm_count = 0
+                self.state = "returning"
+                play_peak_beep()
+        else:
+            self._peak_confirm_count = 0
         return None
 
     def _tick_return_returning(self) -> Optional[Dict[str, Any]]:
-        """Check if returned to start HR in return mode."""
+        """Check if returned to start HR in return mode.
+
+        Requires CONFIRM_READINGS consecutive readings at or below start_hr.
+        """
         if self._current_hr <= self.start_hr:
-            return self._finish()
+            self._return_confirm_count += 1
+            if self._return_confirm_count >= CONFIRM_READINGS:
+                return self._finish()
+        else:
+            self._return_confirm_count = 0
         return None
 
     def _finish(self) -> Dict[str, Any]:
@@ -208,6 +263,7 @@ class RapidChangeController:
             "mode": self.mode,
             "start_hr": self.start_hr,
             "end_hr": self.end_hr,
+            "breathing_only": self.breathing_only,
             "elapsed_s": round(elapsed, 2),
             "direction": self._direction,
         }
@@ -217,6 +273,7 @@ class RapidChangeController:
 
         save_rc_entry(entry)
         self.state = "finished"
+        play_end_beep()
         return entry
 
     def cancel(self) -> None:
@@ -245,7 +302,7 @@ class RapidChangeWidget:
 
     Placed inside the Apps collapsible header, as a collapsible tree node.
     Contains:
-      - Configuration controls (mode, start HR, end HR)
+      - Configuration controls (mode, start HR, end HR, breathing_only)
       - Start / Cancel button
       - Live status display
       - Bar chart of completion times for current config
@@ -265,6 +322,7 @@ class RapidChangeWidget:
         self._current_mode = "one_way"
         self._current_start_hr = 60
         self._current_end_hr = 100
+        self._current_breathing_only = False
         # Track unique tag IDs for past config buttons
         self._config_button_tags: List[str] = []
 
@@ -308,6 +366,16 @@ class RapidChangeWidget:
                     min_clamped=True, max_clamped=True,
                     width=120, callback=self._on_config_changed
                 )
+
+            dpg.add_spacer(height=4)
+
+            # --- Breathing Only setting ---
+            dpg.add_checkbox(
+                label="Breathing Only",
+                tag=self._tag("breathing_only"),
+                default_value=False,
+                callback=self._on_config_changed
+            )
 
             dpg.add_spacer(height=5)
 
@@ -414,9 +482,11 @@ class RapidChangeWidget:
         self._current_mode = dpg.get_value(self._tag("mode_radio"))
         self._current_start_hr = dpg.get_value(self._tag("start_hr"))
         self._current_end_hr = dpg.get_value(self._tag("end_hr"))
+        self._current_breathing_only = dpg.get_value(self._tag("breathing_only"))
 
         self.controller.configure(
-            self._current_mode, self._current_start_hr, self._current_end_hr
+            self._current_mode, self._current_start_hr, self._current_end_hr,
+            self._current_breathing_only
         )
         self._update_end_hr_label()
         self._refresh_chart()
@@ -447,6 +517,7 @@ class RapidChangeWidget:
             dpg.configure_item(self._tag("mode_radio"), enabled=False)
             dpg.configure_item(self._tag("start_hr"), enabled=False)
             dpg.configure_item(self._tag("end_hr"), enabled=False)
+            dpg.configure_item(self._tag("breathing_only"), enabled=False)
 
             if self.controller.mode == "return":
                 dpg.set_value(self._tag("status"),
@@ -490,6 +561,7 @@ class RapidChangeWidget:
         dpg.configure_item(self._tag("mode_radio"), enabled=True)
         dpg.configure_item(self._tag("start_hr"), enabled=True)
         dpg.configure_item(self._tag("end_hr"), enabled=True)
+        dpg.configure_item(self._tag("breathing_only"), enabled=True)
 
     # -- past config click --
 
@@ -499,6 +571,7 @@ class RapidChangeWidget:
         dpg.set_value(self._tag("mode_radio"), cfg["mode"])
         dpg.set_value(self._tag("start_hr"), cfg["start_hr"])
         dpg.set_value(self._tag("end_hr"), cfg["end_hr"])
+        dpg.set_value(self._tag("breathing_only"), cfg.get("breathing_only", False))
         self._on_config_changed()
 
     # -- data helpers --
@@ -514,7 +587,8 @@ class RapidChangeWidget:
 
         times = get_times_for_config(
             self._history, self._current_mode,
-            self._current_start_hr, self._current_end_hr
+            self._current_start_hr, self._current_end_hr,
+            self._current_breathing_only
         )
 
         self._bar_indices = [float(i + 1) for i in range(len(times))]
@@ -558,9 +632,13 @@ class RapidChangeWidget:
             else:
                 label = f"{mode_label}: {cfg['start_hr']} → {cfg['end_hr']}"
 
+            if cfg.get("breathing_only", False):
+                label += "  [Breathing Only]"
+
             # Count games for this config
             count = len(get_times_for_config(
-                self._history, cfg["mode"], cfg["start_hr"], cfg["end_hr"]
+                self._history, cfg["mode"], cfg["start_hr"], cfg["end_hr"],
+                cfg.get("breathing_only", False)
             ))
             label += f"  ({count} games)"
 
@@ -581,10 +659,12 @@ class RapidChangeWidget:
                     dpg.add_text(f"End HR: {cfg['end_hr']} BPM")
                     direction = "Increase" if cfg["end_hr"] > cfg["start_hr"] else "Decrease"
                     dpg.add_text(f"Direction: {direction}")
+                dpg.add_text(f"Breathing Only: {'Yes' if cfg.get('breathing_only', False) else 'No'}")
                 dpg.add_text(f"Games played: {count}")
                 # Show best time
                 times = get_times_for_config(
-                    self._history, cfg["mode"], cfg["start_hr"], cfg["end_hr"]
+                    self._history, cfg["mode"], cfg["start_hr"], cfg["end_hr"],
+                    cfg.get("breathing_only", False)
                 )
                 if times:
                     dpg.add_text(f"Best time: {min(times):.2f}s")
