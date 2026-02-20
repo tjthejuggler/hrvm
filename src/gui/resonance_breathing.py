@@ -147,6 +147,9 @@ class ResonanceBreathingWidget:
             self.leaderboard = self.history[-1]["leaderboard"]
             self._update_leaderboard_ui()
 
+    # -------------------------------------------------------------------------
+    # HARDWARE & DATA INGESTION
+    # -------------------------------------------------------------------------
     def set_hr_status(self, is_connected: bool):
         self._hr_connected = is_connected
         if not self._built: return
@@ -166,18 +169,27 @@ class ResonanceBreathingWidget:
                 dpg.configure_item("rb_manual_start_btn", enabled=True)
 
     def feed_rr(self, rr_ms: float):
+        """Called by ui_manager for every heartbeat to fill our data arrays."""
         if not self._built: return
         if self.state in [self.STATE_BASELINE, self.STATE_TESTING, self.STATE_TESTING_CONT]:
             ts = time.time() - self._epoch_start_time
             self._epoch_rr.append(rr_ms)
             self._epoch_ts.append(ts)
 
+    def update_resonance_score(self, score: float) -> None:
+        """MISSING METHOD RESTORED: Satisfies ui_manager.py payload update"""
+        self._latest_coherence = score
+        if self._built and dpg.does_item_exist("rb_manual_coherence"):
+            dpg.set_value("rb_manual_coherence", f"{score:.1f}")
+
+    # -------------------------------------------------------------------------
+    # UI DRAWING
+    # -------------------------------------------------------------------------
     def _draw_horizontal_pacer(self, phase_rad: float, phase_text: str):
         dpg.delete_item("rb_pacer_drawlist", children_only=True)
         mod_phase = phase_rad % (2 * np.pi)
         
         if phase_text == "MANUAL":
-            # For manual, phase_rad is just elapsed time t_cycle
             t_cycle = phase_rad
             i, hi, e = self.m_in, self.m_hi, self.m_ex
             if t_cycle < i: txt, vol, col = "INHALE", t_cycle / i, (0, 200, 255, 255) 
@@ -185,7 +197,6 @@ class ResonanceBreathingWidget:
             elif t_cycle < i + hi + e: txt, vol, col = "EXHALE", 1.0 - ((t_cycle - i - hi) / e), (0, 200, 255, 255) 
             else: txt, vol, col = "HOLD EMPTY", 0.0, (80, 80, 80, 255)
         else:
-            # For continuous/stepped via radians
             if mod_phase < np.pi: txt, vol, col = "INHALE", mod_phase / np.pi, (0, 200, 255, 255)
             else: txt, vol, col = "EXHALE", 1.0 - ((mod_phase - np.pi) / np.pi), (0, 200, 255, 255)
 
@@ -193,6 +204,9 @@ class ResonanceBreathingWidget:
         dpg.draw_rectangle((0, 0), (_PACER_W * vol, _PACER_H), color=(0,0,0,0), fill=col, parent="rb_pacer_drawlist")
         dpg.draw_text((_PACER_W / 2 - 30, _PACER_H / 2 - 10), txt, size=20, color=(255, 255, 255), parent="rb_pacer_drawlist")
 
+    # -------------------------------------------------------------------------
+    # STATE MACHINE TICK
+    # -------------------------------------------------------------------------
     def tick(self) -> None:
         if not self._built: return
         current_time = time.time()
@@ -258,6 +272,9 @@ class ResonanceBreathingWidget:
                     if self.grid_index >= len(self.assessment_grid): self._finish_stepped_assessment()
                     else: self._start_testing_block()
 
+    # -------------------------------------------------------------------------
+    # PROTOCOL LOGIC
+    # -------------------------------------------------------------------------
     def _start_assessment(self, sender=None, app_data=None):
         if not self._hr_connected: return
         preset_key = dpg.get_value("rb_preset_combo")
