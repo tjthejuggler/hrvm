@@ -201,6 +201,8 @@ class UIManager:
             self._hrv_source = new_source
             self._refresh_hrv_section_visibility()
 
+            self.resonance_breathing.set_hr_status(self._hrv_source is not None)
+
     def _pvs_is_streaming_hr(self) -> bool:
         """Return True if PVS is connected and actively streaming HR data.
 
@@ -640,6 +642,7 @@ class UIManager:
             # Feed RR intervals to counting game
             for rr in data.rr_intervals:
                 self.counting_game.feed_rr(rr)
+                self.resonance_breathing.feed_rr(rr)
 
             # Chess SessionRecorder — H10 source
             if self.is_json_recording and hasattr(self, '_session_recorder'):
@@ -728,6 +731,7 @@ class UIManager:
             # Feed RR intervals to counting game
             for rr in rr_data:
                 self.counting_game.feed_rr(rr)
+                self.resonance_breathing.feed_rr(rr) 
 
             if self.is_json_recording and hasattr(self, '_session_recorder'):
                 for rr in rr_data:
