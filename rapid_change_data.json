@@ -1,0 +1,11 @@
+[
+  {
+    "timestamp": 1771583034.7917585,
+    "mode": "one_way",
+    "start_hr": 85,
+    "end_hr": 100,
+    "breathing_only": false,
+    "elapsed_s": 40.01,
+    "direction": "up"
+  }
+]
