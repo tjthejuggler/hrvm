@@ -73,6 +73,7 @@ class SignalProcessor:
         # State
         self.pacer_target_bpm = 6.0 # Default
         self.last_coherence_calc_time = 0.0
+        self._last_coherence_score = 0.0  # carry-forward to avoid saw-teeth
         self.assessment_active = False
         self.current_assessment_tag = None
         self.assessment_data = {} # {tag: [amplitudes]}
@@ -200,12 +201,15 @@ class SignalProcessor:
         # Use device-reported HR directly
         display_hr = float(hr_bpm) if hr_bpm > 0 else (y_new[-1] if len(y_new) > 0 else 0.0)
 
-        # Coherence calculation
-        coherence_score = 0.0
+        # Coherence calculation — carry forward last known value to avoid saw-teeth
+        coherence_score = self._last_coherence_score
         if current_time - self.last_coherence_calc_time > 1.0:
             if len(y_new) > 0:
                 target_freq = self.pacer_target_bpm / 60.0
-                coherence_score = calculate_coherence_score(y_new, target_freq=target_freq)
+                new_score = calculate_coherence_score(y_new, target_freq=target_freq)
+                if new_score > 0.0:
+                    self._last_coherence_score = new_score
+                    coherence_score = new_score
                 self.last_coherence_calc_time = current_time
 
         # Assessment logic
@@ -339,12 +343,15 @@ class SignalProcessor:
         if len(y_new) > 0:
             latest_interpolated = y_new[-1]
         
-        # 2. Coherence Calculation (Throttled)
-        coherence_score = 0.0
+        # 2. Coherence Calculation (Throttled) — carry forward last known value
+        coherence_score = self._last_coherence_score
         if current_time - self.last_coherence_calc_time > 1.0: # 1Hz
             if len(y_new) > 0:
                 target_freq = self.pacer_target_bpm / 60.0
-                coherence_score = calculate_coherence_score(y_new, target_freq=target_freq)
+                new_score = calculate_coherence_score(y_new, target_freq=target_freq)
+                if new_score > 0.0:
+                    self._last_coherence_score = new_score
+                    coherence_score = new_score
                 self.last_coherence_calc_time = current_time
         
         # 3. Assessment Logic

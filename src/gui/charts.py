@@ -41,7 +41,7 @@ class BiofeedbackChart(CollapsibleChart):
                 with dpg.plot_axis(dpg.mvYAxis, label="BPM", tag="bf_y_axis"):
                     dpg.add_line_series([], [], label="Interpolated HR", tag="hr_series")
                     dpg.add_line_series([], [], label="Pacer", tag="pacer_series")
-                    dpg.set_axis_limits("bf_y_axis", 40, 120)
+                    dpg.set_axis_limits("bf_y_axis", 50, 90)  # initial sensible default
 
 
 class HeartbeatChart(CollapsibleChart):

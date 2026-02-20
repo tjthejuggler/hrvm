@@ -594,6 +594,7 @@ class UIManager:
             if len(self.biofeedback_chart.hr_x) > 0:
                 dpg.set_axis_limits("bf_x_axis",
                                     max(0, current_time - 60), current_time + 5)
+                self._update_hr_y_axis()
 
         # RMSSD / SDNN — update top-bar metrics (H10 is the primary source)
         self.current_rmssd = data.hrv_rmssd
@@ -685,6 +686,7 @@ class UIManager:
                 if len(self.biofeedback_chart.hr_x) > 0:
                     dpg.set_axis_limits("bf_x_axis",
                                         max(0, current_time - 60), current_time + 5)
+                    self._update_hr_y_axis()
 
                 if self.is_json_recording and hasattr(self, '_session_recorder'):
                     self._session_recorder.add_hr_sample(int(hr_val))
@@ -772,6 +774,16 @@ class UIManager:
             dpg.configure_item("hb_blink_circle", fill=(red, 0, 0, 255))
         else:
             dpg.configure_item("hb_blink_circle", fill=(0, 0, 0, 255))
+
+    def _update_hr_y_axis(self):
+        """Set the HR chart Y-axis to ±10% of the visible data range."""
+        hr_y = list(self.biofeedback_chart.hr_y)
+        if len(hr_y) < 2:
+            return
+        data_min = min(hr_y)
+        data_max = max(hr_y)
+        margin = max((data_max - data_min) * 0.1, 2.0)  # at least 2 BPM margin
+        dpg.set_axis_limits("bf_y_axis", data_min - margin, data_max + margin)
 
     # --- BLE Control ---
 
