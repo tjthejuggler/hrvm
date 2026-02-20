@@ -32,6 +32,7 @@ from src.gui.resonance_breathing import ResonanceBreathingWidget
 from src.gui.led_ball import LEDBallController
 from src.database.db_manager import DatabaseManager
 from src.gui.pacer import PacerEngine
+from src.recording.session_recorder import RRRecorder
 from src.ble.genki_manager import GenkiWaveManager
 from src.gui.genki_bar import GenkiWaveBar
 from src.gui.genki_charts import GenkiGyroChart, GenkiAccChart, GenkiGyroSumChart
@@ -77,6 +78,11 @@ class UIManager:
         self.is_genki_connected = False  # Genki Wave connection state
         self.is_recording = False
         self.is_json_recording = False  # Flag for JSON recording
+
+        # Recording type selection
+        self._recording_types: List[str] = ["chess", "meditation", "movie"]
+        self._recording_type: str = "chess"
+        self._rr_recorder: Optional[RRRecorder] = None  # Always-on RR recorder
 
         # HRV source tracking: "h10" | "pvs" | None
         # H10 is preferred; PVS is used as fallback when H10 is not connected
@@ -238,6 +244,10 @@ class UIManager:
 
         with dpg.window(tag=self.window_tag, label="HRV Biofeedback", no_title_bar=True):
 
+            # --- Recording Control Row (above all device rows) ---
+            self._build_recording_row()
+            dpg.add_separator()
+
             # --- Polar H10 Top Bar ---
             self._build_top_bar()
             dpg.add_separator()
@@ -364,6 +374,28 @@ class UIManager:
 
         dpg.set_primary_window(self.window_tag, True)
 
+    def _build_recording_row(self):
+        """Top recording control row — sits above all device rows."""
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="⏺ Rec", tag="rec_btn",
+                           callback=self.handle_recording_toggle, width=70)
+            dpg.add_text("", tag="rec_status_text", color=(255, 80, 80))
+            dpg.add_spacer(width=10)
+            dpg.add_combo(
+                items=self._recording_types,
+                tag="rec_type_combo",
+                default_value=self._recording_types[0],
+                width=130,
+                callback=self._on_recording_type_changed,
+            )
+            dpg.add_button(label="+ Add", callback=self.open_add_recording_type_popup,
+                           width=60)
+            dpg.add_spacer(width=30)
+            dpg.add_button(label="⚙ Settings", callback=self.open_settings_popup, width=100)
+
+    def _on_recording_type_changed(self, sender, app_data):
+        self._recording_type = app_data
+
     def _build_top_bar(self):
         with dpg.group(horizontal=True):
             dpg.add_text("Polar H10", color=(0, 191, 255))
@@ -381,15 +413,9 @@ class UIManager:
                            callback=self.handle_session_toggle, show=False, width=120)
 
             dpg.add_spacer(width=10)
-            dpg.add_button(label="Rec", tag="rec_btn",
-                           callback=self.handle_recording_toggle, width=60)
-            dpg.add_text("", tag="rec_status_text", color=(255, 0, 0))
-
             dpg.add_button(label="History", callback=self.create_history_window, width=80)
             dpg.add_checkbox(label="Audio Feedback", callback=self.toggle_audio,
                              default_value=False)
-            dpg.add_spacer(width=20)
-            dpg.add_button(label="⚙ Settings", callback=self.open_settings_popup, width=100)
 
     def _build_metrics_bar(self):
         """Horizontal bar of large session metric numbers."""
@@ -615,10 +641,15 @@ class UIManager:
             for rr in data.rr_intervals:
                 self.counting_game.feed_rr(rr)
 
-            # JSON recording — H10 is the active source
+            # Chess SessionRecorder — H10 source
             if self.is_json_recording and hasattr(self, '_session_recorder'):
                 for rr in data.rr_intervals:
                     self._session_recorder.add_rr_interval(rr)
+
+            # RR recorder — all recording types
+            if self.is_json_recording and self._rr_recorder is not None:
+                for rr in data.rr_intervals:
+                    self._rr_recorder.add_rr(rr)
 
         if self.is_json_recording and hasattr(self, '_session_recorder') and hr_val > 0:
             self._session_recorder.add_hr_sample(int(hr_val))
@@ -701,6 +732,11 @@ class UIManager:
             if self.is_json_recording and hasattr(self, '_session_recorder'):
                 for rr in rr_data:
                     self._session_recorder.add_rr_interval(rr)
+
+            # RR recorder — all recording types
+            if self.is_json_recording and self._rr_recorder is not None:
+                for rr in rr_data:
+                    self._rr_recorder.add_rr(rr)
 
     def handle_acc_data(self, batch: ACCBatch):
         """Handle accelerometer data from BLE."""
@@ -862,55 +898,75 @@ class UIManager:
             dpg.configure_item("session_btn", label="Start Session")
 
     def handle_recording_toggle(self):
-        """Toggle JSON recording state.
+        """Toggle recording state.
+
+        For all recording types: starts an RRRecorder that captures a flat list
+        of RR values and saves them as {epoch_seconds}.json.
+
+        For 'chess' type only: also runs the full chess-coach SessionRecorder
+        (H10 path via signal processor, or PVS fallback).
 
         Uses the Polar H10 as the data source if connected; falls back to the
-        Polar Verity Sense if it is streaming HR data.  The recording is driven
-        by data arriving in handle_processed_data / handle_data_update (H10) or
-        _poll_pvs (PVS fallback) — whichever is the active HRV source.
+        Polar Verity Sense if it is streaming HR data.
         """
+        rec_type = self._recording_type
+
         if not self.is_json_recording:
-            # Determine which source to use
-            if self.is_connected:
-                # H10 path: delegate to the signal-processor process
-                self.is_json_recording = True
-                dpg.configure_item("rec_btn", label="Stop")
-                dpg.set_value("rec_status_text", "Recording... (H10)")
-                try:
-                    self.math_control_pipe.send(IPCMessage(MSG_CMD_START_RECORDING))
-                except Exception as e:
-                    logger.error(f"Failed to send start recording command: {e}")
-            elif self._pvs_hr_streaming:
-                # PVS fallback path: record locally in the GUI process
-                from src.recording.session_recorder import SessionRecorder
-                self._session_recorder = SessionRecorder(
-                    device_name="Polar Verity Sense",
-                    device_id="",
-                )
-                self._session_recorder.start()
-                self.is_json_recording = True
-                dpg.configure_item("rec_btn", label="Stop")
-                dpg.set_value("rec_status_text", "Recording... (PVS)")
-                logger.info("JSON recording started via Polar Verity Sense")
-            else:
+            has_source = self.is_connected or self._pvs_hr_streaming
+            if not has_source:
                 logger.warning("Recording requested but no HR source is active")
+                return
+
+            # --- Always start the RR recorder ---
+            self._rr_recorder = RRRecorder(recording_type=rec_type)
+            self._rr_recorder.start()
+
+            # --- Chess-specific: full SessionRecorder ---
+            if rec_type == "chess":
+                if self.is_connected:
+                    try:
+                        self.math_control_pipe.send(IPCMessage(MSG_CMD_START_RECORDING))
+                    except Exception as e:
+                        logger.error(f"Failed to send start recording command: {e}")
+                elif self._pvs_hr_streaming:
+                    from src.recording.session_recorder import SessionRecorder
+                    self._session_recorder = SessionRecorder(
+                        device_name="Polar Verity Sense",
+                        device_id="",
+                    )
+                    self._session_recorder.start()
+                    logger.info("Chess SessionRecorder started via Polar Verity Sense")
+
+            self.is_json_recording = True
+            source_label = "H10" if self.is_connected else "PVS"
+            dpg.configure_item("rec_btn", label="⏹ Stop")
+            dpg.set_value("rec_status_text",
+                          f"● {rec_type.capitalize()} ({source_label})")
+            logger.info(f"Recording started: type={rec_type}, source={source_label}")
+
         else:
-            # Stop recording
+            # --- Stop recording ---
             self.is_json_recording = False
-            dpg.configure_item("rec_btn", label="Rec")
+            dpg.configure_item("rec_btn", label="⏺ Rec")
             dpg.set_value("rec_status_text", "")
 
-            if self.is_connected:
-                # H10 path: tell signal processor to stop
+            # Stop RR recorder (all types)
+            if self._rr_recorder is not None:
+                rr_path = self._rr_recorder.stop()
+                if rr_path:
+                    logger.info(f"RR recording saved to: {rr_path}")
+                self._rr_recorder = None
+
+            # Stop chess SessionRecorder if it was running
+            if self.is_connected and rec_type == "chess":
                 try:
                     self.math_control_pipe.send(IPCMessage(MSG_CMD_STOP_RECORDING))
                 except Exception as e:
                     logger.error(f"Failed to send stop recording command: {e}")
             elif hasattr(self, '_session_recorder'):
-                # PVS path: finalise the local recorder
                 filepath = self._session_recorder.stop()
                 if filepath:
-                    logger.info(f"PVS recording saved to: {filepath}")
+                    logger.info(f"PVS chess recording saved to: {filepath}")
                 del self._session_recorder
 
     def select_recording_folder(self):
@@ -934,6 +990,31 @@ class UIManager:
         folder_path = dpg.get_value("recording_folder_input")
         logger.info(f"Recording folder set to: {folder_path}")
         dpg.delete_item("folder_selection_modal")
+
+    def open_add_recording_type_popup(self):
+        """Open a small popup to add a custom recording type label."""
+        if dpg.does_item_exist("add_rec_type_popup"):
+            dpg.delete_item("add_rec_type_popup")
+        with dpg.window(label="Add Recording Type", modal=True,
+                        tag="add_rec_type_popup", width=300, height=110,
+                        no_resize=True):
+            dpg.add_input_text(tag="new_rec_type_input", hint="e.g. yoga",
+                               width=-1)
+            dpg.add_spacer(height=6)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Add", callback=self._confirm_add_recording_type,
+                               width=80)
+                dpg.add_button(label="Cancel",
+                               callback=lambda: dpg.delete_item("add_rec_type_popup"),
+                               width=80)
+
+    def _confirm_add_recording_type(self):
+        label = dpg.get_value("new_rec_type_input").strip()
+        if label and label not in self._recording_types:
+            self._recording_types.append(label)
+            dpg.configure_item("rec_type_combo", items=self._recording_types)
+            logger.info(f"Added recording type: {label}")
+        dpg.delete_item("add_rec_type_popup")
 
     def poll_ble_status(self):
         try:
@@ -1041,6 +1122,10 @@ class UIManager:
 
                     if self.is_json_recording and hasattr(self, '_session_recorder'):
                         self._session_recorder.add_rr_interval(rr)
+
+                    # RR recorder — all recording types
+                    if self.is_json_recording and self._rr_recorder is not None:
+                        self._rr_recorder.add_rr(rr)
 
             self.hrv_tachogram_chart.update_plot(current_time)
             self.hrv_poincare_chart.update_plot()

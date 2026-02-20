@@ -9,6 +9,10 @@ Each recording session produces one JSON file at:
 
 The recorder accumulates HR, RR interval, RMSSD, and SDNN samples in memory
 and writes the complete JSON file when the session is finalized.
+
+RRRecorder is a simpler recorder that captures a flat list of all RR values
+for any recording type (chess, meditation, movie, custom). Output is saved to
+the current working directory as {unix_epoch_seconds}.json.
 """
 
 import json
@@ -317,4 +321,95 @@ class SessionRecorder:
             return filepath
         except (OSError, IOError) as e:
             logger.error(f"Failed to write session JSON to {filepath}: {e}")
+            return None
+
+
+# Default output directory for RR recordings
+RR_OUTPUT_DIR = "/home/twain/Projects/hrvm/recordings"
+
+
+class RRRecorder:
+    """Simple recorder that captures a flat list of all RR intervals.
+
+    Works for any recording type (chess, meditation, movie, custom).
+    Output is saved to RR_OUTPUT_DIR as:
+        {unix_epoch_seconds}.json
+
+    JSON structure:
+        {
+            "type": "chess",
+            "started_at": "2026-02-20T09:00:00.000Z",
+            "rr_values": [832, 845, 801, ...]
+        }
+    """
+
+    def __init__(self, recording_type: str = "chess",
+                 output_dir: str = RR_OUTPUT_DIR):
+        self.recording_type = recording_type
+        self.output_dir = output_dir
+        self.is_recording = False
+        self._start_unix: Optional[float] = None
+        self._start_utc: Optional[datetime] = None
+        self._rr_values: List[int] = []
+
+    def start(self) -> None:
+        """Begin capturing RR intervals."""
+        if self.is_recording:
+            logger.warning("RRRecorder.start() called while already recording")
+            return
+        self._start_unix = time.time()
+        self._start_utc = datetime.now(timezone.utc)
+        self._rr_values = []
+        self.is_recording = True
+        logger.info(
+            f"RRRecorder started (type={self.recording_type}) "
+            f"at {_format_utc_iso(self._start_utc)}"
+        )
+
+    def add_rr(self, rr_ms: float) -> None:
+        """Append a single RR interval (ms). Physiologically invalid values are dropped."""
+        if not self.is_recording:
+            return
+        rr_int = int(round(rr_ms))
+        if 300 < rr_int < 2000:
+            self._rr_values.append(rr_int)
+
+    def stop(self) -> Optional[str]:
+        """Stop recording and write the JSON file.
+
+        Returns the filepath of the written JSON, or None on failure.
+        Filename is the integer Unix epoch seconds at recording start.
+        """
+        if not self.is_recording or self._start_utc is None or self._start_unix is None:
+            logger.warning("RRRecorder.stop() called but not recording")
+            return None
+
+        self.is_recording = False
+
+        data = {
+            "type": self.recording_type,
+            "started_at": _format_utc_iso(self._start_utc),
+            "rr_values": self._rr_values,
+        }
+
+        epoch_seconds = int(self._start_unix)
+        filename = f"{epoch_seconds}.json"
+
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"RRRecorder failed to create output dir {self.output_dir}: {e}")
+            return None
+
+        filepath = os.path.join(self.output_dir, filename)
+
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info(
+                f"RRRecorder saved {len(self._rr_values)} RR values to: {filepath}"
+            )
+            return filepath
+        except (OSError, IOError) as e:
+            logger.error(f"RRRecorder failed to write {filepath}: {e}")
             return None
