@@ -1,0 +1,32 @@
+{
+  "active_profile": "Default",
+  "profiles": {
+    "Default": {
+      "ips": [
+        "10.122.252.133"
+      ],
+      "triggers": [
+        {
+          "device": "Genki Wave",
+          "metric": "Gyroscope",
+          "axes": [
+            "x",
+            "y",
+            "z"
+          ],
+          "operator": ">",
+          "threshold": 500.0,
+          "color": [
+            40.56470489501953,
+            255.0,
+            0.0,
+            255.0
+          ],
+          "targets": [
+            0
+          ]
+        }
+      ]
+    }
+  }
+}

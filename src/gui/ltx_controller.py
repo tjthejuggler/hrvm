@@ -3,6 +3,7 @@ import struct
 import json
 import os
 import time
+import copy
 import logging
 import dearpygui.dearpygui as dpg
 from typing import List, Dict, Any, Optional
@@ -38,17 +39,13 @@ class LTXSender:
 class LTXApp:
     """
     The main controller for the LTX App.
-    Manages IPs, Triggers, and the GUI.
+    Manages Profiles, IPs, Triggers, Visual Feedback, and the GUI.
     """
     
-    # Device Constants
     DEV_H10 = "Polar H10"
     DEV_PVS = "Polar Verity Sense"
     DEV_GENKI = "Genki Wave"
 
-    # Metric Definition:
-    # Key = Display Name
-    # Value = List of internal keys if Vector (X, Y, Z), or None if Scalar
     METRIC_DEFS = {
         DEV_H10: {
             "HR": None,
@@ -66,20 +63,25 @@ class LTXApp:
             "Accelerometer": ["Acc X", "Acc Y", "Acc Z"],
             "Gyroscope": ["Gyro X", "Gyro Y", "Gyro Z"],
             "Magnetometer": ["Mag X", "Mag Y", "Mag Z"],
-            # Adding P/R as scalars for simplicity or vectors if preferred
             "Pitch": None,
             "Roll": None
         }
     }
 
     def __init__(self):
+        # Profile System State
+        self.profiles: Dict[str, Dict] = {}
+        self.active_profile: str = "Default"
+        
+        # Working State (Synced to Active Profile)
         self.ips: List[str] = []
         self.triggers: List[Dict] = []
+        
+        # Runtime Objects
         self.senders: Dict[str, LTXSender] = {}
         self._last_trigger_times: Dict[int, float] = {} 
+        self._editing_idx: Optional[int] = None
         
-        # Flattened Data State (Internal Keys)
-        # E.g. "Acc X", "HR"
         self.data_state = {
             self.DEV_H10: {},
             self.DEV_PVS: {},
@@ -90,6 +92,7 @@ class LTXApp:
 
         # GUI Tags
         self.tag_node = "ltx_app_node"
+        self.tag_profile_combo = "ltx_profile_combo"
         self.tag_ip_list = "ltx_ip_list"
         self.tag_ip_input = "ltx_ip_input"
         self.tag_trigger_table = "ltx_trigger_table"
@@ -107,27 +110,70 @@ class LTXApp:
         self.tag_color_picker = "ltx_m_color"
         self.tag_target_balls = "ltx_m_targets" 
 
-    # --- Persistence ---
+    # --- Persistence & Profiles ---
 
     def _load_config(self):
         if not os.path.exists(CONFIG_FILE):
-            self.ips = ["10.122.252.133"] 
-            self._update_senders()
+            self._create_default_profile()
             return
         
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
-                self.ips = data.get("ips", [])
-                self.triggers = data.get("triggers", [])
-                self._update_senders()
+                
+                # Migrate Legacy Format to Profile Format
+                if "profiles" in data:
+                    self.profiles = data["profiles"]
+                    self.active_profile = data.get("active_profile", "Default")
+                else:
+                    self.profiles = {
+                        "Default": {
+                            "ips": data.get("ips", []),
+                            "triggers": data.get("triggers", [])
+                        }
+                    }
+                    self.active_profile = "Default"
+
         except Exception as e:
             logger.error(f"Failed to load LTX config: {e}")
+            self._create_default_profile()
+
+        # Failsafe
+        if self.active_profile not in self.profiles:
+            if not self.profiles:
+                self._create_default_profile()
+            else:
+                self.active_profile = list(self.profiles.keys())[0]
+
+        self._load_active_profile()
+
+    def _create_default_profile(self):
+        self.profiles = {
+            "Default": {
+                "ips": ["10.122.252.133"],
+                "triggers": []
+            }
+        }
+        self.active_profile = "Default"
+        self._load_active_profile()
+
+    def _load_active_profile(self):
+        """Loads data from the active profile dict into working variables."""
+        prof = self.profiles[self.active_profile]
+        self.ips = copy.deepcopy(prof.get("ips", []))
+        self.triggers = copy.deepcopy(prof.get("triggers", []))
+        self._update_senders()
 
     def _save_config(self):
+        """Syncs working variables back to active profile dict, then saves to file."""
+        self.profiles[self.active_profile] = {
+            "ips": copy.deepcopy(self.ips),
+            "triggers": copy.deepcopy(self.triggers)
+        }
+        
         data = {
-            "ips": self.ips,
-            "triggers": self.triggers
+            "active_profile": self.active_profile,
+            "profiles": self.profiles
         }
         try:
             with open(CONFIG_FILE, "w") as f:
@@ -185,9 +231,8 @@ class LTXApp:
             if trig.get('device') != device_updated:
                 continue
             
-            # --- Value Calculation ---
-            metric_name = trig.get('metric') # e.g., "Accelerometer" or "HR"
-            axes = trig.get('axes', []) # e.g., ["x", "y"] or []
+            metric_name = trig.get('metric')
+            axes = trig.get('axes', [])
             
             dev_def = self.METRIC_DEFS.get(device_updated, {})
             metric_info = dev_def.get(metric_name)
@@ -195,18 +240,14 @@ class LTXApp:
             current_val = 0.0
             data_map = self.data_state[device_updated]
 
-            # 1. Scalar Case (HR, RR)
+            # 1. Scalar
             if metric_info is None: 
-                # Internal key same as display name for scalars in my setup
                 val = data_map.get(metric_name)
                 if val is None: continue
                 current_val = float(val)
 
-            # 2. Vector Case (Acc, Gyro) - Sum of Absolute Values (Manhattan)
+            # 2. Vector (Manhattan Sum of selected axes)
             else:
-                # metric_info is list ["Acc X", "Acc Y", "Acc Z"]
-                # axes is list ["x", "y", "z"] from user selection
-                
                 valid_read = False
                 temp_sum = 0.0
                 
@@ -221,7 +262,7 @@ class LTXApp:
                     if v is not None: 
                         temp_sum += abs(v)
                         valid_read = True
-                        
+                
                 if 'z' in axes and len(metric_info) > 2:
                     v = data_map.get(metric_info[2])
                     if v is not None: 
@@ -232,7 +273,7 @@ class LTXApp:
                     continue
                 current_val = temp_sum
 
-            # --- Condition Check ---
+            # Condition
             threshold = float(trig.get('threshold', 0.0))
             op = trig.get('operator', '>')
             triggered = False
@@ -251,11 +292,18 @@ class LTXApp:
     def _execute_command(self, trigger):
         color = trigger.get('color', [255, 255, 255, 255])
         r, g, b = int(color[0]), int(color[1]), int(color[2])
-        
         target_indices = trigger.get('targets', [])
-        for ip_idx in target_indices:
-            if 0 <= ip_idx < len(self.ips):
-                ip = self.ips[ip_idx]
+
+        for idx in target_indices:
+            # 1. Update Visual Circles
+            if 0 <= idx < 3:
+                vis_tag = f"ltx_ball_vis_{idx}"
+                if dpg.does_item_exist(vis_tag):
+                    dpg.configure_item(vis_tag, fill=color)
+
+            # 2. Send UDP
+            if 0 <= idx < len(self.ips):
+                ip = self.ips[idx]
                 if ip in self.senders:
                     self.senders[ip].send_color(r, g, b)
 
@@ -264,6 +312,36 @@ class LTXApp:
     def build(self, parent_tag):
         with dpg.tree_node(label="LTX Controller", parent=parent_tag, tag=self.tag_node):
             
+            # --- PROFILE MANAGEMENT ROW ---
+            with dpg.group(horizontal=True):
+                dpg.add_text("Config Profile:")
+                dpg.add_combo(items=list(self.profiles.keys()), default_value=self.active_profile, 
+                              tag=self.tag_profile_combo, width=200, callback=self._cb_profile_changed)
+                dpg.add_button(label="Save As New...", callback=self._cb_open_save_as_modal)
+                dpg.add_button(label="Delete", callback=self._cb_delete_profile)
+                
+            dpg.add_separator()
+            
+            # --- VISUAL FEEDBACK (3 Circles) ---
+            with dpg.group(horizontal=True):
+                dpg.add_text("   Ball 1        Ball 2        Ball 3", color=(200,200,200))
+
+            with dpg.drawlist(width=400, height=70):
+                y_pos = 35
+                radius = 25
+                x_start = 40
+                gap = 100
+
+                for i in range(3):
+                    center_x = x_start + (i * gap)
+                    dpg.draw_circle(center=(center_x, y_pos), radius=radius+2, 
+                                    color=(255, 255, 255, 255), thickness=2)
+                    dpg.draw_circle(center=(center_x, y_pos), radius=radius, 
+                                    fill=(30, 30, 30, 255), tag=f"ltx_ball_vis_{i}")
+                    dpg.draw_text(pos=(center_x-5, y_pos-10), text=str(i+1), size=20, color=(255,255,255,255))
+            
+            dpg.add_separator()
+
             with dpg.group(horizontal=True):
                 # --- Left Col: IP Management ---
                 with dpg.child_window(width=220, height=300):
@@ -279,23 +357,29 @@ class LTXApp:
                 with dpg.child_window(width=-1, height=300):
                     with dpg.group(horizontal=True):
                         dpg.add_text("Triggers & Commands", color=(0, 255, 0))
-                        dpg.add_button(label="+ Add Trigger", callback=self._cb_open_modal)
+                        dpg.add_button(label="+ Add Trigger", callback=lambda s, a, u: self._open_trigger_modal(None))
                     
                     dpg.add_separator()
                     
                     with dpg.table(tag=self.tag_trigger_table, header_row=True, 
                                    resizable=True, policy=dpg.mvTable_SizingStretchProp,
                                    scrollY=True):
-                        dpg.add_table_column(label="Dev", width_fixed=True)
-                        dpg.add_table_column(label="Metric", width_fixed=True)
+                        dpg.add_table_column(label="Dev")
+                        dpg.add_table_column(label="Metric")
                         dpg.add_table_column(label="Axes", width_fixed=True)
-                        dpg.add_table_column(label="Cond", width_fixed=True)
+                        dpg.add_table_column(label="Cond")
                         dpg.add_table_column(label="Color", width_fixed=True)
                         dpg.add_table_column(label="Targets")
-                        dpg.add_table_column(label="Action", width_fixed=True)
+                        dpg.add_table_column(label="Actions", width_fixed=True, init_width_or_weight=80)
             
             dpg.add_separator()
             self._render_trigger_table()
+
+    def _render_all_ui(self):
+        """Updates IP List and Trigger Table after a profile load."""
+        if dpg.does_item_exist(self.tag_ip_list):
+            dpg.configure_item(self.tag_ip_list, items=self.ips)
+        self._render_trigger_table()
 
     def _render_trigger_table(self):
         if dpg.does_item_exist(self.tag_trigger_table):
@@ -308,23 +392,72 @@ class LTXApp:
                 dpg.add_text(trig['device'])
                 dpg.add_text(trig['metric'])
                 
-                # Axes column
                 axes = trig.get('axes', [])
-                if axes:
-                    dpg.add_text("+".join([a.upper() for a in axes]))
-                else:
-                    dpg.add_text("-")
+                dpg.add_text("+".join([a.upper() for a in axes]) if axes else "-")
                 
                 dpg.add_text(f"{trig['operator']} {trig['threshold']}")
                 
-                dpg.add_color_button(trig['color'], no_inputs=True, no_tooltip=True, width=30, height=20)
+                # FIXED: removed invalid args
+                dpg.add_color_button(trig['color'], width=30, height=20, no_drag_drop=True)
                 
                 t_str = ",".join([str(i+1) for i in trig['targets']])
                 dpg.add_text(f"#{t_str}")
                 
-                dpg.add_button(label="Del", user_data=idx, callback=self._cb_del_trigger, width=40)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Edit", user_data=idx, callback=lambda s, a, u: self._open_trigger_modal(u))
+                    dpg.add_button(label="Del", user_data=idx, callback=self._cb_del_trigger)
 
-    # --- Callbacks ---
+    # --- Profile Callbacks ---
+
+    def _cb_profile_changed(self, sender, app_data):
+        self.active_profile = app_data
+        self._load_active_profile()
+        self._render_all_ui()
+        self._save_config()
+
+    def _cb_open_save_as_modal(self):
+        if dpg.does_item_exist("ltx_save_as_modal"):
+            dpg.delete_item("ltx_save_as_modal")
+            
+        with dpg.window(label="Save Profile As...", modal=True, tag="ltx_save_as_modal", width=300, height=130):
+            dpg.add_spacer(height=5)
+            dpg.add_input_text(label="Name", tag="ltx_new_profile_name", width=200)
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Save", callback=self._cb_confirm_save_as, width=80)
+                dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("ltx_save_as_modal"), width=80)
+
+    def _cb_confirm_save_as(self):
+        new_name = dpg.get_value("ltx_new_profile_name").strip()
+        if new_name:
+            self.active_profile = new_name
+            # Copy state to new profile immediately
+            self.profiles[new_name] = {
+                "ips": copy.deepcopy(self.ips),
+                "triggers": copy.deepcopy(self.triggers)
+            }
+            # Update Combo
+            dpg.configure_item(self.tag_profile_combo, items=list(self.profiles.keys()))
+            dpg.set_value(self.tag_profile_combo, new_name)
+            self._save_config()
+        dpg.delete_item("ltx_save_as_modal")
+
+    def _cb_delete_profile(self):
+        if self.active_profile in self.profiles:
+            del self.profiles[self.active_profile]
+            
+        if not self.profiles:
+            self._create_default_profile()
+            
+        self.active_profile = list(self.profiles.keys())[0]
+        self._load_active_profile()
+        
+        dpg.configure_item(self.tag_profile_combo, items=list(self.profiles.keys()))
+        dpg.set_value(self.tag_profile_combo, self.active_profile)
+        self._render_all_ui()
+        self._save_config()
+
+    # --- Config Callbacks ---
 
     def _cb_add_ip(self, sender, app_data):
         ip = dpg.get_value(self.tag_ip_input).strip()
@@ -350,25 +483,25 @@ class LTXApp:
             self._render_trigger_table()
             self._save_config()
 
-    # --- Modal Logic (Add Trigger) ---
+    # --- Modal Logic (Add / Edit Trigger) ---
 
-    def _cb_open_modal(self):
+    def _open_trigger_modal(self, trigger_idx: Optional[int]):
+        """Opens modal for Adding (trigger_idx=None) or Editing."""
+        self._editing_idx = trigger_idx
+
         if dpg.does_item_exist(self.tag_modal):
             dpg.delete_item(self.tag_modal)
         
-        with dpg.window(label="Add Trigger", modal=True, tag=self.tag_modal, width=400, height=500):
+        title = "Edit Trigger" if trigger_idx is not None else "Add Trigger"
+        
+        with dpg.window(label=title, modal=True, tag=self.tag_modal, width=400, height=520):
             dpg.add_text("1. Input Signal")
-            
-            # Device Selection
             dpg.add_combo(items=[self.DEV_H10, self.DEV_PVS, self.DEV_GENKI], 
                           label="Device", tag=self.tag_combo_dev,
                           callback=self._cb_device_selected)
-            
-            # Metric Selection
             dpg.add_combo(items=[], label="Metric", tag=self.tag_combo_metric,
                           callback=self._cb_metric_selected)
             
-            # Axes Selection (Hidden by default)
             with dpg.group(horizontal=True, tag=self.tag_group_axes, show=False):
                 dpg.add_text("Sum Axes: ")
                 dpg.add_checkbox(label="X", tag=self.tag_chk_x, default_value=True)
@@ -388,10 +521,8 @@ class LTXApp:
             
             dpg.add_text("Target Balls:")
             with dpg.group(horizontal=True, tag=self.tag_target_balls):
-                if not self.ips:
-                    dpg.add_text("(No IPs added yet)", color=(150,150,150))
-                for i, ip in enumerate(self.ips):
-                    dpg.add_checkbox(label=f"#{i+1}", tag=f"ltx_chk_{i}", default_value=True)
+                for i in range(3):
+                    dpg.add_checkbox(label=f"Ball {i+1}", tag=f"ltx_chk_{i}", default_value=True)
 
             dpg.add_separator()
             dpg.add_spacer(height=10)
@@ -399,23 +530,44 @@ class LTXApp:
                 dpg.add_button(label="Save", callback=self._cb_save_trigger, width=80)
                 dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item(self.tag_modal), width=80)
 
+        # Pre-fill data if Editing
+        if self._editing_idx is not None:
+            t = self.triggers[self._editing_idx]
+            
+            dpg.set_value(self.tag_combo_dev, t['device'])
+            self._cb_device_selected(None, t['device'])  # Populate metrics
+            
+            dpg.set_value(self.tag_combo_metric, t['metric'])
+            self._cb_metric_selected(None, t['metric'])  # Show/Hide axes
+            
+            axes = t.get('axes', [])
+            dpg.set_value(self.tag_chk_x, 'x' in axes)
+            dpg.set_value(self.tag_chk_y, 'y' in axes)
+            dpg.set_value(self.tag_chk_z, 'z' in axes)
+            
+            dpg.set_value(self.tag_combo_op, t['operator'])
+            dpg.set_value(self.tag_input_thresh, float(t['threshold']))
+            dpg.set_value(self.tag_color_picker, t['color'])
+            
+            targets = t.get('targets', [])
+            for i in range(3):
+                dpg.set_value(f"ltx_chk_{i}", i in targets)
+
     def _cb_device_selected(self, sender, app_data):
         dev = app_data
         metrics = list(self.METRIC_DEFS.get(dev, {}).keys())
         dpg.configure_item(self.tag_combo_metric, items=metrics)
-        dpg.configure_item(self.tag_group_axes, show=False) # Hide until metric chosen
-        
+        dpg.configure_item(self.tag_group_axes, show=False)
         if metrics:
-            dpg.set_value(self.tag_combo_metric, metrics[0])
-            self._cb_metric_selected(None, metrics[0])
+            # Only auto-select if we aren't pre-filling an edit
+            if dpg.get_value(self.tag_combo_metric) not in metrics:
+                dpg.set_value(self.tag_combo_metric, metrics[0])
+            self._cb_metric_selected(None, dpg.get_value(self.tag_combo_metric))
 
     def _cb_metric_selected(self, sender, app_data):
         dev = dpg.get_value(self.tag_combo_dev)
         metric = app_data
-        
         info = self.METRIC_DEFS.get(dev, {}).get(metric)
-        
-        # If info is a list (vector), show axes checkboxes
         is_vector = isinstance(info, list)
         dpg.configure_item(self.tag_group_axes, show=is_vector)
 
@@ -426,14 +578,12 @@ class LTXApp:
         thresh = dpg.get_value(self.tag_input_thresh)
         color = dpg.get_value(self.tag_color_picker)
         
-        # Get targets
         targets = []
-        for i in range(len(self.ips)):
+        for i in range(3):
             chk_tag = f"ltx_chk_{i}"
             if dpg.does_item_exist(chk_tag) and dpg.get_value(chk_tag):
                 targets.append(i)
         
-        # Get Axes if applicable
         axes = []
         if dpg.is_item_shown(self.tag_group_axes):
             if dpg.get_value(self.tag_chk_x): axes.append("x")
@@ -452,7 +602,12 @@ class LTXApp:
             "targets": targets
         }
         
-        self.triggers.append(new_trig)
+        if self._editing_idx is not None:
+            self.triggers[self._editing_idx] = new_trig
+        else:
+            self.triggers.append(new_trig)
+            
+        self._editing_idx = None
         self._save_config()
         self._render_trigger_table()
         dpg.delete_item(self.tag_modal)
