@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from multiprocessing.connection import Connection
 from multiprocessing import shared_memory
 
+
 from src.utils.ipc import (
     IPCMessage, BLECommand, ACCBatch, ECGBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
     MSG_HEARTBEAT_BLINK,
@@ -43,6 +44,7 @@ from src.gui.pvs_charts import (
     PVSAccChart, PVSGyroChart, PVSMagChart, PVSPPIChart,
     PVSHeartRateChart,
 )
+from src.gui.ltx_controller import LTXApp
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,9 @@ class UIManager:
 
         # Resonance Breathing app
         self.resonance_breathing = ResonanceBreathingWidget(db=self.db)
+
+        # LTX controller app
+        self.ltx_app = LTXApp()
 
         # Genki Wave manager + bar + charts
         self.genki_manager = GenkiWaveManager()
@@ -289,6 +294,8 @@ class UIManager:
                         self.counting_game.build("apps_container")
                         self.rapid_change_game.build("apps_container")
                         self.resonance_breathing.build("apps_container")
+                        dpg.add_spacer(height=10, parent="apps_container")
+                        self.ltx_app.build("apps_container")
 
                 # --- Graphs Section ---
                 with dpg.theme(tag="graphs_header_theme"):
@@ -588,6 +595,12 @@ class UIManager:
             # Feed HR to rapid change game
             self.rapid_change_game.feed_hr(hr_val)
 
+            if hr_val > 0:
+                self.ltx_app.feed_h10_metrics(hr=hr_val)
+            if data.rr_intervals:
+             # Just pass the last one for real-time trigger check
+                self.ltx_app.feed_h10_metrics(rr=data.rr_intervals[-1])
+
             # Biofeedback chart
             self.biofeedback_chart.hr_x.append(current_time)
             self.biofeedback_chart.hr_y.append(hr_val)
@@ -754,6 +767,11 @@ class UIManager:
         self.acc_chart.add_samples(batch.timestamp_unix, batch.samples,
                                    batch.sample_rate, self.start_time)
         self.acc_chart.update_plot(current_time)
+
+        # Batch samples are typically (N, 3). Take the last one.
+        if len(batch.samples) > 0:
+            last_sample = batch.samples[-1]
+            self.ltx_app.feed_h10_acc(last_sample[0], last_sample[1], last_sample[2])
 
     def handle_ecg_data(self, batch: ECGBatch):
         """Handle ECG data from BLE PMD service."""
@@ -1108,6 +1126,8 @@ class UIManager:
             self.genki_gyro_sum_chart.add_samples(samples)
             self.genki_gyro_sum_chart.update_plot()
 
+            self.ltx_app.feed_genki_data(samples)
+
     # --- Polar Verity Sense Polling ---
 
     def _poll_pvs(self):
@@ -1131,6 +1151,8 @@ class UIManager:
         self.pvs_ppi_chart.update_plot()
         self.pvs_hr_chart.add_samples(samples)
         self.pvs_hr_chart.update_plot()
+
+        self.ltx_app.feed_pvs_data(samples)
 
         # When PVS is the active HRV source (H10 not connected and PVS streaming HR),
         # feed HR/PPI data into the HRV section charts and top-bar metrics.
