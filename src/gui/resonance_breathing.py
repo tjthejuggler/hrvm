@@ -13,7 +13,7 @@ from src.processing.resonance_math import PhysiologicalMath, ContinuousPacer, Co
 
 logger = logging.getLogger(__name__)
 
-_PACER_W = 850
+_PACER_W = 1200
 _PACER_H = 60
 _HISTORY_FILE = "rf_history.json"
 
