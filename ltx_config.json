@@ -15,13 +15,16 @@
             "z"
           ],
           "operator": ">",
-          "threshold": 500.0,
+          "threshold": 1000.0,
+          "gesture": "1x Click",
+          "action_type": "Rainbow: Toggle (Start/Stop)",
           "color": [
-            40.56470489501953,
-            255.0,
-            0.0,
+            4.686274528503418,
+            251.19215393066406,
+            190.4823455810547,
             255.0
           ],
+          "cycle_name": "Traffic",
           "targets": [
             0
           ]
