@@ -78,6 +78,15 @@ class ResonanceBreathingWidget:
     def build(self, parent: str) -> None:
         if self._built: return
 
+        # Register a medium font for the info labels if not already registered
+        if not dpg.does_item_exist("rb_medium_font"):
+            with dpg.font_registry():
+                dpg.add_font(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    size=22,
+                    tag="rb_medium_font"
+                )
+
         with dpg.tree_node(label="Resonance Frequency Assessment", parent=parent, default_open=True, tag="rb_node"):
             dpg.add_text("Resonance Frequency Assessment", color=(100, 220, 180))
             dpg.add_text("⚠️ HR Device Required (Connect Polar H10 or PVS)", tag="rb_hr_warning_text", color=(255, 50, 50))
@@ -138,7 +147,32 @@ class ResonanceBreathingWidget:
 
             dpg.add_separator()
             dpg.add_spacer(height=10)
-            dpg.add_text("Timing: -- | --", tag="rb_pacer_timing_text", show=False, color=(200, 200, 255))
+            with dpg.group(horizontal=True, tag="rb_timing_group", show=False):
+                with dpg.group():
+                    dpg.add_text("INHALE", color=(150, 150, 200))
+                    dpg.add_text("--s", tag="rb_inhale_sec_text", color=(100, 220, 255))
+                    dpg.bind_item_font("rb_inhale_sec_text", "rb_medium_font")
+                dpg.add_spacer(width=40)
+                with dpg.group():
+                    dpg.add_text("EXHALE", color=(150, 150, 200))
+                    dpg.add_text("--s", tag="rb_exhale_sec_text", color=(100, 220, 255))
+                    dpg.bind_item_font("rb_exhale_sec_text", "rb_medium_font")
+                dpg.add_spacer(width=40)
+                with dpg.group():
+                    dpg.add_text("RATE", color=(150, 150, 200))
+                    dpg.add_text("-- BPM", tag="rb_bpm_text", color=(200, 200, 255))
+                    dpg.bind_item_font("rb_bpm_text", "rb_medium_font")
+                dpg.add_spacer(width=40)
+                with dpg.group():
+                    dpg.add_text("RATIO", color=(150, 150, 200))
+                    dpg.add_text("1:--", tag="rb_ratio_text", color=(200, 200, 255))
+                    dpg.bind_item_font("rb_ratio_text", "rb_medium_font")
+                dpg.add_spacer(width=40)
+                with dpg.group():
+                    dpg.add_text("TIME LEFT", color=(150, 150, 200))
+                    dpg.add_text("--:--", tag="rb_time_left_text", color=(255, 220, 100))
+                    dpg.bind_item_font("rb_time_left_text", "rb_medium_font")
+            dpg.add_text("", tag="rb_pacer_timing_text", show=False)
             with dpg.drawlist(width=_PACER_W, height=_PACER_H, tag="rb_pacer_drawlist", show=False): pass 
 
         self._built = True
@@ -217,33 +251,57 @@ class ResonanceBreathingWidget:
 
         if self.state == self.STATE_TESTING_CONT:
             dpg.configure_item("rb_pacer_drawlist", show=True)
-            dpg.configure_item("rb_pacer_timing_text", show=True)
+            dpg.configure_item("rb_timing_group", show=True)
             
             bpm, phase, _ = self.continuous_pacer.evaluate(current_time - self.block_start_time)
-            dpg.set_value("rb_pacer_timing_text", f"Continuous Sliding Target: {bpm[0]:.2f} BPM")
+            cur_bpm = bpm[0]
+            cycle = 60.0 / cur_bpm
+            i_sec = cycle / 2.0
+            e_sec = cycle / 2.0
+            rem = self.test_duration - (current_time - self.block_start_time)
+            dpg.set_value("rb_inhale_sec_text", f"{i_sec:.1f}s")
+            dpg.set_value("rb_exhale_sec_text", f"{e_sec:.1f}s")
+            dpg.set_value("rb_bpm_text", f"{cur_bpm:.2f} BPM")
+            dpg.set_value("rb_ratio_text", "1:1")
+            dpg.set_value("rb_time_left_text", self._fmt_time(max(0, rem)))
             self._draw_horizontal_pacer(phase[0], "RADIAN")
             
         elif self.state == self.STATE_TESTING:
             dpg.configure_item("rb_pacer_drawlist", show=True)
-            dpg.configure_item("rb_pacer_timing_text", show=True)
+            dpg.configure_item("rb_timing_group", show=True)
             bpm, ratio = self.assessment_grid[self.grid_index]
             cycle = 60.0 / bpm
             i_sec = cycle / (1.0 + ratio)
+            e_sec = cycle - i_sec
+            rem = self.test_duration - (current_time - self.block_start_time)
             
             t_cycle = (current_time - self.block_start_time) % cycle
             phase_rad = (t_cycle / cycle) * 2 * np.pi
-            dpg.set_value("rb_pacer_timing_text", f"Timing: Inhale {i_sec:.1f}s | Exhale {cycle-i_sec:.1f}s")
+            dpg.set_value("rb_inhale_sec_text", f"{i_sec:.1f}s")
+            dpg.set_value("rb_exhale_sec_text", f"{e_sec:.1f}s")
+            dpg.set_value("rb_bpm_text", f"{bpm:.1f} BPM")
+            dpg.set_value("rb_ratio_text", f"1:{ratio}")
+            dpg.set_value("rb_time_left_text", self._fmt_time(max(0, rem)))
             self._draw_horizontal_pacer(phase_rad, "RADIAN")
             
         elif self.state == "MANUAL_ACTIVE":
             dpg.configure_item("rb_pacer_drawlist", show=True)
-            dpg.configure_item("rb_pacer_timing_text", show=True)
-            dpg.set_value("rb_pacer_timing_text", f"Manual: {self.m_in} | {self.m_hi} | {self.m_ex} | {self.m_he}")
+            dpg.configure_item("rb_timing_group", show=True)
             c = self.m_in + self.m_hi + self.m_ex + self.m_he
+            dpg.set_value("rb_inhale_sec_text", f"{self.m_in:.1f}s")
+            dpg.set_value("rb_exhale_sec_text", f"{self.m_ex:.1f}s")
+            if c > 0:
+                bpm_manual = 60.0 / c
+                dpg.set_value("rb_bpm_text", f"{bpm_manual:.1f} BPM")
+            else:
+                dpg.set_value("rb_bpm_text", "-- BPM")
+            ratio_manual = round(self.m_ex / self.m_in, 1) if self.m_in > 0 else "--"
+            dpg.set_value("rb_ratio_text", f"1:{ratio_manual}")
+            dpg.set_value("rb_time_left_text", "--:--")
             if c > 0: self._draw_horizontal_pacer((current_time - self.block_start_time) % c, "MANUAL")
         else:
             dpg.configure_item("rb_pacer_drawlist", show=False)
-            dpg.configure_item("rb_pacer_timing_text", show=False)
+            dpg.configure_item("rb_timing_group", show=False)
 
         if self.state not in [self.STATE_IDLE, self.STATE_COMPLETE, "MANUAL_ACTIVE"]:
             block_elapsed = current_time - self.block_start_time

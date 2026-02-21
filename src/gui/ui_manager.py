@@ -1,3 +1,4 @@
+import os
 import dearpygui.dearpygui as dpg
 import numpy as np
 import time
@@ -45,6 +46,9 @@ from src.gui.pvs_charts import (
 
 logger = logging.getLogger(__name__)
 
+_RECORDING_TYPES_FILE = "recording_types.json"
+_DEFAULT_RECORDING_TYPES = ["chess", "meditation", "movie"]
+
 
 class UIManager:
     def __init__(self, data_pipe: Connection, ble_control_pipe: Connection,
@@ -80,8 +84,8 @@ class UIManager:
         self.is_json_recording = False  # Flag for JSON recording
 
         # Recording type selection
-        self._recording_types: List[str] = ["chess", "meditation", "movie"]
-        self._recording_type: str = "chess"
+        self._recording_types: List[str] = self._load_recording_types()
+        self._recording_type: str = self._recording_types[0]
         self._rr_recorder: Optional[RRRecorder] = None  # Always-on RR recorder
 
         # HRV source tracking: "h10" | "pvs" | None
@@ -379,7 +383,7 @@ class UIManager:
     def _build_recording_row(self):
         """Top recording control row — sits above all device rows."""
         with dpg.group(horizontal=True):
-            dpg.add_button(label="⏺ Rec", tag="rec_btn",
+            dpg.add_button(label="[REC]", tag="rec_btn",
                            callback=self.handle_recording_toggle, width=70)
             dpg.add_text("", tag="rec_status_text", color=(255, 80, 80))
             dpg.add_spacer(width=10)
@@ -955,7 +959,7 @@ class UIManager:
 
             self.is_json_recording = True
             source_label = "H10" if self.is_connected else "PVS"
-            dpg.configure_item("rec_btn", label="⏹ Stop")
+            dpg.configure_item("rec_btn", label="[STOP]")
             dpg.set_value("rec_status_text",
                           f"● {rec_type.capitalize()} ({source_label})")
             logger.info(f"Recording started: type={rec_type}, source={source_label}")
@@ -963,7 +967,7 @@ class UIManager:
         else:
             # --- Stop recording ---
             self.is_json_recording = False
-            dpg.configure_item("rec_btn", label="⏺ Rec")
+            dpg.configure_item("rec_btn", label="[REC]")
             dpg.set_value("rec_status_text", "")
 
             # Stop RR recorder (all types)
@@ -1024,11 +1028,34 @@ class UIManager:
                                callback=lambda: dpg.delete_item("add_rec_type_popup"),
                                width=80)
 
+    def _load_recording_types(self) -> list:
+        """Load recording types from file, falling back to defaults."""
+        import json as _json
+        try:
+            if os.path.exists(_RECORDING_TYPES_FILE):
+                with open(_RECORDING_TYPES_FILE, "r") as f:
+                    data = _json.load(f)
+                    if isinstance(data, list) and data:
+                        return data
+        except Exception as e:
+            logger.error(f"Failed to load recording types: {e}")
+        return list(_DEFAULT_RECORDING_TYPES)
+
+    def _save_recording_types(self):
+        """Persist the current recording types list to file."""
+        import json as _json
+        try:
+            with open(_RECORDING_TYPES_FILE, "w") as f:
+                _json.dump(self._recording_types, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save recording types: {e}")
+
     def _confirm_add_recording_type(self):
         label = dpg.get_value("new_rec_type_input").strip()
         if label and label not in self._recording_types:
             self._recording_types.append(label)
             dpg.configure_item("rec_type_combo", items=self._recording_types)
+            self._save_recording_types()
             logger.info(f"Added recording type: {label}")
         dpg.delete_item("add_rec_type_popup")
 
