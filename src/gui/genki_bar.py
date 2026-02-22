@@ -5,13 +5,15 @@ Builds the 'Genki Wave' connection bar with:
   - Status indicator
   - BLE address input
   - Connect/Disconnect button
+  - Breath Profile dropdown + Calibrate button
 
 Keeps the bar logic separate from the main UIManager for modularity.
+The calibration callback is injected by UIManager after construction.
 """
 
 import dearpygui.dearpygui as dpg
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.ble.genki_manager import GenkiWaveManager
@@ -28,9 +30,13 @@ class GenkiWaveBar:
     def __init__(self, manager: 'GenkiWaveManager'):
         self.manager = manager
         self._prev_status = ""
+        # Injected by UIManager after construction
+        self.on_calibrate: Optional[Callable] = None
+        self.on_profile_changed: Optional[Callable] = None
 
     def build(self):
         """Build the Genki Wave top bar. Call inside a dpg.window context."""
+        from src.processing.acc_respiration import PROFILES
         with dpg.group(horizontal=True):
             dpg.add_text("Genki Wave", color=(0, 255, 128))
             dpg.add_spacer(width=20)
@@ -50,6 +56,32 @@ class GenkiWaveBar:
                 callback=self._handle_connect,
                 width=100,
             )
+            dpg.add_spacer(width=20)
+            dpg.add_text("Breath Profile:", color=(150, 220, 255))
+            dpg.add_combo(
+                items=PROFILES,
+                tag="genki_breath_profile_combo",
+                default_value=PROFILES[0],
+                width=150,
+                callback=self._handle_profile_changed,
+            )
+            dpg.add_button(
+                label="Calibrate Breath",
+                tag="genki_cal_btn",
+                callback=self._handle_calibrate,
+                width=130,
+            )
+            dpg.add_text("", tag="genki_breath_rate_text", color=(100, 255, 180))
+
+    def _handle_calibrate(self):
+        """Delegate to UIManager's Genki calibration opener."""
+        if self.on_calibrate:
+            self.on_calibrate()
+
+    def _handle_profile_changed(self, sender, app_data):
+        """Delegate profile change to UIManager."""
+        if self.on_profile_changed:
+            self.on_profile_changed(app_data)
 
     def _handle_connect(self):
         """Handle the Connect/Disconnect button click."""

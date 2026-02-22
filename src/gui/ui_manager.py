@@ -32,6 +32,7 @@ from src.gui.h10_imu_charts import (
     ACCChart, ACCXChart, ACCYChart, ACCZChart, ECGChart, BreathingPhaseChart,
 )
 from src.processing.acc_respiration import AccRespirationEngine, PROFILES
+from src.processing.genki_respiration import GenkiRespirationEngine
 from src.gui.counting_game import CountingGameWidget
 from src.gui.rapid_change_game import RapidChangeWidget
 from src.gui.resonance_breathing import ResonanceBreathingWidget
@@ -159,8 +160,14 @@ class UIManager:
         self.ecg_chart = ECGChart()
         self.breath_phase_chart = BreathingPhaseChart()
 
-        # ACC-based respiration engine
+        # ACC-based respiration engine (H10)
         self.acc_resp_engine = AccRespirationEngine()
+
+        # Genki Wave respiration engine (separate cal file, 3-axis)
+        self.genki_resp_engine = GenkiRespirationEngine()
+
+        # Breath source: "h10" | "genki"
+        self._breath_source: str = "h10"
 
         # HRV section charts (device-agnostic, H10 preferred / PVS fallback)
         self.hrv_tachogram_chart = HRVTachogramChart()
@@ -184,6 +191,8 @@ class UIManager:
         # Genki Wave manager + bar + charts
         self.genki_manager = GenkiWaveManager()
         self.genki_bar = GenkiWaveBar(self.genki_manager)
+        self.genki_bar.on_calibrate = self._open_genki_breath_cal_popup
+        self.genki_bar.on_profile_changed = self._on_genki_breath_profile_changed
         self.genki_gyro_chart = GenkiGyroChart()
         self.genki_acc_chart = GenkiAccChart()
         self.genki_gyro_sum_chart = GenkiGyroSumChart()
@@ -502,7 +511,7 @@ class UIManager:
                 items=PROFILES,
                 tag="breath_profile_combo",
                 default_value=PROFILES[0],
-                width=100,
+                width=150,
                 callback=self._on_breath_profile_changed,
             )
             dpg.add_button(
@@ -553,11 +562,11 @@ class UIManager:
                 dpg.add_progress_bar(tag="quality_bar", default_value=0.0, width=200)
 
     def open_settings_popup(self):
-        """Open a modal settings window with Presets and LED Ball controls."""
+        """Open a modal settings window with Presets, LED Ball, and Breath Source."""
         if dpg.does_item_exist("settings_popup"):
             dpg.delete_item("settings_popup")
         with dpg.window(label="Settings", modal=True, tag="settings_popup",
-                        width=380, height=320, no_resize=True):
+                        width=380, height=380, no_resize=True):
             dpg.add_text("Presets", color=(0, 255, 255))
             dpg.add_separator()
             dpg.add_input_text(tag="preset_name_input", width=200, hint="Preset Name")
@@ -576,6 +585,20 @@ class UIManager:
                                on_enter=True)
 
             dpg.add_spacer(height=14)
+            dpg.add_text("Breath Source", color=(0, 255, 255))
+            dpg.add_separator()
+            dpg.add_text("Which device drives the breathing chart & rate:",
+                         color=(180, 180, 180))
+            dpg.add_radio_button(
+                items=["H10 (ACC Z-axis)", "Genki Wave (auto-axis)"],
+                tag="breath_source_radio",
+                default_value="H10 (ACC Z-axis)" if self._breath_source == "h10"
+                              else "Genki Wave (auto-axis)",
+                callback=self._on_breath_source_changed,
+                horizontal=True,
+            )
+
+            dpg.add_spacer(height=14)
             dpg.add_text("Recording", color=(0, 255, 255))
             dpg.add_separator()
             dpg.add_button(label="Set Rec Folder",
@@ -586,33 +609,199 @@ class UIManager:
                            callback=lambda: dpg.delete_item("settings_popup"),
                            width=-1)
 
-    # --- Breathing Calibration ---
+    def _on_breath_source_changed(self, sender, app_data):
+        self._breath_source = "h10" if "H10" in app_data else "genki"
+        logger.info(f"Breath source set to: {self._breath_source}")
+
+    # --- H10 Breathing Calibration ---
 
     def _on_breath_profile_changed(self, sender, app_data):
         self.acc_resp_engine.profile = app_data
 
+    # --- Genki Breathing Calibration ---
+
+    def _on_genki_breath_profile_changed(self, app_data: str):
+        self.genki_resp_engine.profile = app_data
+
+    def _open_genki_breath_cal_popup(self):
+        """Open the Genki Wave breathing calibration popup."""
+        if dpg.does_item_exist("genki_breath_cal_popup"):
+            dpg.delete_item("genki_breath_cal_popup")
+
+        profile = self.genki_resp_engine.profile
+        no_hold = self.genki_resp_engine.is_no_hold_profile
+        self.genki_resp_engine.start_calibration()
+
+        popup_height = 320 if no_hold else 350
+
+        with dpg.window(
+            label=f"Calibrate Genki Breathing — {profile.replace('_', ' ').title()}",
+            modal=True, tag="genki_breath_cal_popup",
+            width=500, height=popup_height, no_resize=True,
+        ):
+            dpg.add_text(
+                f"Profile: {profile.replace('_', ' ').title()}",
+                color=(100, 255, 180),
+            )
+            dpg.add_separator()
+            dpg.add_text(
+                "The best axis (X/Y/Z) is auto-selected when you finish.",
+                color=(180, 180, 180),
+            )
+            if no_hold:
+                dpg.add_text(
+                    "Hold [Z] while inhaling, [X] while exhaling:",
+                    color=(200, 200, 200),
+                )
+            else:
+                dpg.add_text(
+                    "Hold the matching key while performing each breathing action:",
+                    color=(200, 200, 200),
+                )
+            dpg.add_spacer(height=6)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="[Z] INHALE",
+                    tag="genki_cal_btn_inhale",
+                    width=130, height=50,
+                    callback=lambda: self.genki_resp_engine.set_cal_state("INHALING"),
+                )
+                dpg.add_button(
+                    label="[X] EXHALE",
+                    tag="genki_cal_btn_exhale",
+                    width=130, height=50,
+                    callback=lambda: self.genki_resp_engine.set_cal_state("EXHALING"),
+                )
+                if not no_hold:
+                    dpg.add_button(
+                        label="[C] HOLD",
+                        tag="genki_cal_btn_hold",
+                        width=130, height=50,
+                        callback=lambda: self.genki_resp_engine.set_cal_state("HOLDING"),
+                    )
+            dpg.add_spacer(height=8)
+            dpg.add_text("Current action: ---", tag="genki_cal_action_text",
+                         color=(255, 220, 50))
+            dpg.add_text("Thresholds: In > 2.0 | Ex < -2.0",
+                         tag="genki_cal_thresh_text", color=(150, 200, 150))
+            dpg.add_text("System sees: ---", tag="genki_cal_system_text",
+                         color=(180, 180, 180))
+            dpg.add_text("Active axis: Z (auto-selected on finish)",
+                         tag="genki_cal_axis_text", color=(150, 180, 255))
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="✔ Finish & Save",
+                    callback=self._finish_genki_breath_cal,
+                    width=160, height=36,
+                )
+                dpg.add_button(
+                    label="✖ Cancel",
+                    callback=self._cancel_genki_breath_cal,
+                    width=100, height=36,
+                )
+
+        # Keyboard handlers
+        if dpg.does_item_exist("genki_breath_cal_key_handler"):
+            dpg.delete_item("genki_breath_cal_key_handler")
+        with dpg.handler_registry(tag="genki_breath_cal_key_handler"):
+            dpg.add_key_press_handler(
+                dpg.mvKey_Z,
+                callback=lambda: self.genki_resp_engine.set_cal_state("INHALING"),
+            )
+            dpg.add_key_press_handler(
+                dpg.mvKey_X,
+                callback=lambda: self.genki_resp_engine.set_cal_state("EXHALING"),
+            )
+            if not no_hold:
+                dpg.add_key_press_handler(
+                    dpg.mvKey_C,
+                    callback=lambda: self.genki_resp_engine.set_cal_state("HOLDING"),
+                )
+
+    def _finish_genki_breath_cal(self):
+        self.genki_resp_engine.finish_calibration()
+        self._cleanup_genki_breath_cal_popup()
+
+    def _cancel_genki_breath_cal(self):
+        self.genki_resp_engine.cancel_calibration()
+        self._cleanup_genki_breath_cal_popup()
+
+    def _cleanup_genki_breath_cal_popup(self):
+        if dpg.does_item_exist("genki_breath_cal_key_handler"):
+            dpg.delete_item("genki_breath_cal_key_handler")
+        if dpg.does_item_exist("genki_breath_cal_popup"):
+            dpg.delete_item("genki_breath_cal_popup")
+
+    def _tick_genki_breath_cal_popup(self):
+        """Called each frame to refresh Genki calibration feedback."""
+        if not dpg.does_item_exist("genki_breath_cal_popup"):
+            return
+        if not self.genki_resp_engine.is_calibrating:
+            return
+
+        state = self.genki_resp_engine.cal_state or "---"
+        if dpg.does_item_exist("genki_cal_action_text"):
+            dpg.set_value("genki_cal_action_text", f"Current action: {state}")
+
+        ti = self.genki_resp_engine.thresh_in
+        te = self.genki_resp_engine.thresh_ex
+        if dpg.does_item_exist("genki_cal_thresh_text"):
+            dpg.set_value("genki_cal_thresh_text",
+                          f"Thresholds: In > {ti:.1f} | Ex < {te:.1f}")
+
+        delta = self.genki_resp_engine.get_delta()
+        if delta is not None and dpg.does_item_exist("genki_cal_system_text"):
+            predicted = self.genki_resp_engine._get_predicted_phase(
+                delta, self.genki_resp_engine.current_phase
+            )
+            match = "✅" if (state == predicted) else "⚠️"
+            dpg.set_value(
+                "genki_cal_system_text",
+                f"System sees: {predicted}  {match}  (delta={delta:.2f})",
+            )
+
+        if dpg.does_item_exist("genki_cal_axis_text"):
+            dpg.set_value(
+                "genki_cal_axis_text",
+                f"Active axis: {self.genki_resp_engine.active_axis_name} "
+                f"(auto-selected on finish)",
+            )
+
     def _open_breath_cal_popup(self):
-        """Open the breathing calibration popup for the currently selected profile."""
+        """Open the breathing calibration popup for the currently selected profile.
+
+        No-hold profiles show only INHALE / EXHALE buttons (no HOLD button).
+        """
         if dpg.does_item_exist("breath_cal_popup"):
             dpg.delete_item("breath_cal_popup")
 
         profile = self.acc_resp_engine.profile
+        no_hold = self.acc_resp_engine.is_no_hold_profile
         self.acc_resp_engine.start_calibration()
 
+        popup_height = 290 if no_hold else 320
+
         with dpg.window(
-            label=f"Calibrate Breathing — {profile.capitalize()}",
+            label=f"Calibrate Breathing — {profile.replace('_', ' ').title()}",
             modal=True, tag="breath_cal_popup",
-            width=480, height=320, no_resize=True,
+            width=480, height=popup_height, no_resize=True,
         ):
             dpg.add_text(
-                f"Profile: {profile.capitalize()}",
+                f"Profile: {profile.replace('_', ' ').title()}",
                 color=(100, 220, 255),
             )
             dpg.add_separator()
-            dpg.add_text(
-                "Hold the matching key while performing each breathing action:",
-                color=(200, 200, 200),
-            )
+            if no_hold:
+                dpg.add_text(
+                    "Hold [Z] while inhaling, [X] while exhaling:",
+                    color=(200, 200, 200),
+                )
+            else:
+                dpg.add_text(
+                    "Hold the matching key while performing each breathing action:",
+                    color=(200, 200, 200),
+                )
             dpg.add_spacer(height=6)
             with dpg.group(horizontal=True):
                 dpg.add_button(
@@ -627,12 +816,13 @@ class UIManager:
                     width=130, height=50,
                     callback=lambda: self.acc_resp_engine.set_cal_state("EXHALING"),
                 )
-                dpg.add_button(
-                    label="[C] HOLD",
-                    tag="cal_btn_hold",
-                    width=130, height=50,
-                    callback=lambda: self.acc_resp_engine.set_cal_state("HOLDING"),
-                )
+                if not no_hold:
+                    dpg.add_button(
+                        label="[C] HOLD",
+                        tag="cal_btn_hold",
+                        width=130, height=50,
+                        callback=lambda: self.acc_resp_engine.set_cal_state("HOLDING"),
+                    )
             dpg.add_spacer(height=8)
             dpg.add_text("Current action: ---", tag="cal_action_text",
                          color=(255, 220, 50))
@@ -653,7 +843,7 @@ class UIManager:
                     width=100, height=36,
                 )
 
-        # Register a keyboard handler for z/x/c while popup is open
+        # Register keyboard handlers while popup is open
         if dpg.does_item_exist("breath_cal_key_handler"):
             dpg.delete_item("breath_cal_key_handler")
         with dpg.handler_registry(tag="breath_cal_key_handler"):
@@ -665,10 +855,11 @@ class UIManager:
                 dpg.mvKey_X,
                 callback=lambda: self.acc_resp_engine.set_cal_state("EXHALING"),
             )
-            dpg.add_key_press_handler(
-                dpg.mvKey_C,
-                callback=lambda: self.acc_resp_engine.set_cal_state("HOLDING"),
-            )
+            if not no_hold:
+                dpg.add_key_press_handler(
+                    dpg.mvKey_C,
+                    callback=lambda: self.acc_resp_engine.set_cal_state("HOLDING"),
+                )
 
     def _finish_breath_cal(self):
         self.acc_resp_engine.finish_calibration()
@@ -741,6 +932,7 @@ class UIManager:
             self._poll_pvs()
             self._poll_ticwatch()
             self._tick_breath_cal_popup()
+            self._tick_genki_breath_cal_popup()
 
             # App ticks
             self.counting_game.tick()
@@ -1001,28 +1193,27 @@ class UIManager:
         self.acc_y_chart.update_plot(current_time)
         self.acc_z_chart.update_plot(current_time)
 
-        # Feed Z-axis samples into the respiration engine
+        # Feed Z-axis samples into the H10 respiration engine
         z_samples = [z for (_, _, z) in batch.samples]
         self.acc_resp_engine.feed_samples(z_samples)
 
-        # Update breathing phase chart (use predicted_phase — raw, no debounce lag)
-        self.breath_phase_chart.update_phase(self.acc_resp_engine.predicted_phase, current_time)
-        self.breath_phase_chart.update_plot(current_time)
+        # Update breathing chart only when H10 is the active breath source
+        if self._breath_source == "h10":
+            self.breath_phase_chart.update_phase(
+                self.acc_resp_engine.predicted_phase, current_time)
+            self.breath_phase_chart.update_plot(current_time)
 
-        # Update breath rate display in top bar and forward to signal processor
-        bpm = self.acc_resp_engine.current_breath_rate_bpm
-        if bpm is not None:
-            if dpg.does_item_exist("breath_rate_text"):
-                dpg.set_value("breath_rate_text", f"{bpm:.1f} br/min")
-            # Forward to signal processor so coherence uses real breath rate
-            try:
-                self.math_control_pipe.send(
-                    IPCMessage(MSG_CMD_SET_ACC_BREATH_RATE, {"bpm": bpm})
-                )
-            except Exception:
-                pass
-            # Also forward to resonance breathing widget
-            self.resonance_breathing.set_acc_breath_rate(bpm)
+            bpm = self.acc_resp_engine.current_breath_rate_bpm
+            if bpm is not None:
+                if dpg.does_item_exist("breath_rate_text"):
+                    dpg.set_value("breath_rate_text", f"{bpm:.1f} br/min")
+                try:
+                    self.math_control_pipe.send(
+                        IPCMessage(MSG_CMD_SET_ACC_BREATH_RATE, {"bpm": bpm})
+                    )
+                except Exception:
+                    pass
+                self.resonance_breathing.set_acc_breath_rate(bpm)
 
         # Batch samples are typically (N, 3). Take the last one.
         if len(batch.samples) > 0:
@@ -1383,6 +1574,30 @@ class UIManager:
             self.genki_gyro_sum_chart.update_plot()
 
             self.ltx_app.feed_genki_data(samples)
+
+            # Feed into Genki respiration engine (always, regardless of source)
+            self.genki_resp_engine.feed_samples(samples)
+
+            # Update breathing chart when Genki is the active breath source
+            if self._breath_source == "genki":
+                current_time = time.time() - self.start_time
+                self.breath_phase_chart.update_phase(
+                    self.genki_resp_engine.predicted_phase, current_time)
+                self.breath_phase_chart.update_plot(current_time)
+
+                bpm = self.genki_resp_engine.current_breath_rate_bpm
+                if bpm is not None:
+                    if dpg.does_item_exist("genki_breath_rate_text"):
+                        dpg.set_value("genki_breath_rate_text", f"{bpm:.1f} br/min")
+                    if dpg.does_item_exist("breath_rate_text"):
+                        dpg.set_value("breath_rate_text", f"{bpm:.1f} br/min")
+                    try:
+                        self.math_control_pipe.send(
+                            IPCMessage(MSG_CMD_SET_ACC_BREATH_RATE, {"bpm": bpm})
+                        )
+                    except Exception:
+                        pass
+                    self.resonance_breathing.set_acc_breath_rate(bpm)
 
     # --- TicWatch Polling ---
 

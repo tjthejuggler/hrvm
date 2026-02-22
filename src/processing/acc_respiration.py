@@ -4,8 +4,15 @@ ACC-based Respiration Detection Engine.
 Detects breathing phase (INHALING, EXHALING, HOLDING) in real-time from
 Polar H10 accelerometer Z-axis data using a calibrated threshold approach.
 
-Calibration is per-profile (standing, sitting, laying) and persists across
-sessions via a JSON file.
+Calibration is per-profile (standing, sitting, laying + no-hold variants)
+and persists across sessions via a JSON file.
+
+Algorithm improvements (2026-02-22):
+  - Shorter lookback (0.3 s) and smoothing (0.1 s) windows for faster response
+  - Calibration uses exponentially-weighted percentiles so recent key-press
+    data dominates — keys held longer have proportionally more influence
+  - Threshold placed at 50% between noise floor and signal peak (was 20%)
+  - No-hold profiles only have INHALING / EXHALING states
 
 Usage:
     engine = AccRespirationEngine()
@@ -24,22 +31,66 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# Constants (mirrored from test_acc_respiration.py)
+# Module-level helper (also used by GenkiRespirationEngine)
+# ---------------------------------------------------------------------------
+
+def _weighted_percentile_standalone(data, percentile: float, decay: float) -> float:
+    """Compute a percentile of *data* where more-recent samples have higher weight.
+
+    Weight of sample i (0 = oldest) = decay^(N-1-i), so the newest sample
+    has weight 1.0 and the oldest has weight decay^(N-1).
+    """
+    arr = np.array(data, dtype=float)
+    n = len(arr)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return float(arr[0])
+
+    indices = np.arange(n)
+    weights = decay ** (n - 1 - indices)
+    weights /= weights.sum()
+
+    sort_idx   = np.argsort(arr)
+    sorted_arr = arr[sort_idx]
+    sorted_w   = weights[sort_idx]
+    cum_w      = np.cumsum(sorted_w)
+
+    target = percentile / 100.0
+    idx    = np.searchsorted(cum_w, target)
+    idx    = min(idx, n - 1)
+    return float(sorted_arr[idx])
+
+
+# ---------------------------------------------------------------------------
+# Constants
 # ---------------------------------------------------------------------------
 SAMPLING_RATE = 200          # Hz — Polar H10 ACC at 200 Hz
 BUFFER_SEC = 2
 BUFFER_SIZE = SAMPLING_RATE * BUFFER_SEC
 
-SMOOTHING_SAMPLES = 40       # 0.2 s
-LOOKBACK_SAMPLES = 100       # 0.5 s
+# Faster windows for quicker response to breathing changes
+SMOOTHING_SAMPLES = 20       # 0.1 s  (was 40 / 0.2 s)
+LOOKBACK_SAMPLES  = 60       # 0.3 s  (was 100 / 0.5 s)
 
-DROP_FACTOR = 0.15           # 15% hysteresis
+DROP_FACTOR = 0.15           # 15 % hysteresis
 
-DEBOUNCE_BREATH = 3          # ~0.15 s — fast trigger for inhale/exhale
-DEBOUNCE_HOLD = 12           # ~0.60 s — swallows deadzone, prevents micro-holds
+DEBOUNCE_BREATH = 2          # ~0.10 s — fast trigger for inhale/exhale (was 3)
+DEBOUNCE_HOLD   = 10         # ~0.50 s — swallows deadzone, prevents micro-holds (was 12)
 
-PROFILES = ["standing", "sitting", "laying"]
+# Profiles: first 3 have HOLD state; last 3 are no-hold (inhale/exhale only)
+PROFILES = [
+    "standing",
+    "sitting",
+    "laying",
+    "standing_nohold",
+    "sitting_nohold",
+    "laying_nohold",
+]
+_NO_HOLD_PROFILES = {"standing_nohold", "sitting_nohold", "laying_nohold"}
+
 _CAL_FILE = "acc_breath_cal.json"
 
 # ---------------------------------------------------------------------------
@@ -73,13 +124,18 @@ class AccRespirationEngine:
         # Calibration session state
         self._calibrating: bool = False
         self._cal_state: Optional[str] = None       # "INHALING" | "EXHALING" | "HOLDING"
+        # Weighted calibration accumulators — store (delta, weight) pairs
         self._cal_data: dict = {
-            "INHALING": deque(maxlen=400),
-            "EXHALING": deque(maxlen=400),
-            "HOLDING":  deque(maxlen=400),
+            "INHALING": deque(maxlen=800),
+            "EXHALING": deque(maxlen=800),
+            "HOLDING":  deque(maxlen=800),
         }
         self._thresh_in: float = 2.0
         self._thresh_ex: float = -2.0
+
+        # Exponential weight decay for calibration samples
+        # Each new sample gets weight 1.0; older samples decay by this factor per sample
+        self._cal_weight_decay: float = 0.995
 
     # ------------------------------------------------------------------
     # Public API
@@ -94,6 +150,10 @@ class AccRespirationEngine:
         if value in PROFILES:
             self._profile = value
             self._apply_profile_thresholds()
+
+    @property
+    def is_no_hold_profile(self) -> bool:
+        return self._profile in _NO_HOLD_PROFILES
 
     def feed_samples(self, z_samples):
         """Feed a list/array of Z-axis ACC samples (mG) into the engine."""
@@ -128,20 +188,21 @@ class AccRespirationEngine:
         """Begin a calibration session for the current profile.
 
         Keeps existing thresholds (loaded from file) as the starting point so
-        the 'System sees' feedback is accurate from the first frame.  Thresholds
-        are only updated incrementally as the user feeds new cal data.
+        the 'System sees' feedback is accurate from the first frame.
         """
         self._calibrating = True
         self._cal_state = None
         for key in self._cal_data:
             self._cal_data[key].clear()
-        # Do NOT reset thresholds here — keep the saved values so the popup
-        # shows meaningful feedback immediately.  If no saved calibration exists
-        # for this profile, _apply_profile_thresholds already set the defaults.
         logger.info(f"ACC calibration started for profile '{self._profile}'")
 
     def set_cal_state(self, state: Optional[str]):
-        """Set the current calibration key: 'INHALING', 'EXHALING', 'HOLDING', or None."""
+        """Set the current calibration key: 'INHALING', 'EXHALING', 'HOLDING', or None.
+
+        For no-hold profiles, 'HOLDING' is silently ignored.
+        """
+        if self.is_no_hold_profile and state == "HOLDING":
+            return
         if state in (None, "INHALING", "EXHALING", "HOLDING"):
             self._cal_state = state
 
@@ -200,20 +261,35 @@ class AccRespirationEngine:
         return float(current_smoothed - past_smoothed)
 
     def _get_predicted_phase(self, delta: float, active: Optional[str]) -> str:
+        """Hysteresis-based phase prediction.
+
+        For no-hold profiles the HOLDING state is never returned — the system
+        stays in the last active breath state until the opposite threshold is crossed.
+        """
+        no_hold = self.is_no_hold_profile
+
         if active == "INHALING":
             if delta < (self._thresh_in * DROP_FACTOR):
-                return "EXHALING" if delta < self._thresh_ex else "HOLDING"
+                if delta < self._thresh_ex:
+                    return "EXHALING"
+                # In no-hold mode, stay INHALING until exhale threshold is crossed
+                return "INHALING" if no_hold else "HOLDING"
             return "INHALING"
+
         elif active == "EXHALING":
             if delta > (self._thresh_ex * DROP_FACTOR):
-                return "INHALING" if delta > self._thresh_in else "HOLDING"
+                if delta > self._thresh_in:
+                    return "INHALING"
+                # In no-hold mode, stay EXHALING until inhale threshold is crossed
+                return "EXHALING" if no_hold else "HOLDING"
             return "EXHALING"
+
         else:  # HOLDING or None
             if delta > self._thresh_in:
                 return "INHALING"
             elif delta < self._thresh_ex:
                 return "EXHALING"
-            return "HOLDING"
+            return "INHALING" if no_hold else "HOLDING"
 
     def _update_phase(self, delta: float):
         raw = self._get_predicted_phase(delta, self.current_phase)
@@ -248,30 +324,47 @@ class AccRespirationEngine:
             self.current_breath_rate_bpm = 60.0 / avg_interval
 
     def _recalculate_thresholds(self):
-        holds = list(self._cal_data["HOLDING"])
+        """Recalculate thresholds using exponentially-weighted percentiles.
+
+        Recent key-press samples are given more weight than older ones, so
+        the calibration converges quickly to the user's actual breathing signal.
+        Threshold is placed at 50% between the noise floor and the signal peak
+        (was 20%), giving a much more responsive trigger.
+        """
+        holds   = list(self._cal_data["HOLDING"])
         inhales = list(self._cal_data["INHALING"])
         exhales = list(self._cal_data["EXHALING"])
 
-        noise_floor = float(np.percentile(np.abs(holds), 85)) if holds else 1.0
+        # --- Noise floor from HOLD data (or a small default) ---
+        if holds:
+            noise_floor = float(_weighted_percentile_standalone(
+                np.abs(holds), 85, self._cal_weight_decay))
+        else:
+            all_data = inhales + exhales
+            if all_data:
+                noise_floor = max(0.5, float(np.percentile(np.abs(all_data), 15)))
+            else:
+                noise_floor = 1.0
 
-        if inhales and holds:
-            median_in = float(np.median(inhales))
-            self._thresh_in = noise_floor + (median_in - noise_floor) * 0.2
-        elif inhales:
-            self._thresh_in = float(np.median(inhales)) * 0.3
+        # --- Inhale threshold ---
+        if inhales:
+            peak_in = float(_weighted_percentile_standalone(
+                inhales, 75, self._cal_weight_decay))
+            self._thresh_in = noise_floor + (peak_in - noise_floor) * 0.5
         else:
             self._thresh_in = noise_floor * 1.5
 
-        if exhales and holds:
-            median_ex = float(np.median(exhales))
-            self._thresh_ex = -noise_floor + (median_ex - (-noise_floor)) * 0.2
-        elif exhales:
-            self._thresh_ex = float(np.median(exhales)) * 0.3
+        # --- Exhale threshold ---
+        if exhales:
+            peak_ex = float(_weighted_percentile_standalone(
+                exhales, 25, self._cal_weight_decay))
+            self._thresh_ex = -noise_floor + (peak_ex - (-noise_floor)) * 0.5
         else:
             self._thresh_ex = -noise_floor * 1.5
 
-        self._thresh_in = max(1.0, self._thresh_in)
-        self._thresh_ex = min(-1.0, self._thresh_ex)
+        # Hard floor so thresholds are never trivially small
+        self._thresh_in = max(0.5, self._thresh_in)
+        self._thresh_ex = min(-0.5, self._thresh_ex)
 
     def _apply_profile_thresholds(self):
         if self._profile in self._cal:
