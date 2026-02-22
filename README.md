@@ -106,18 +106,24 @@ The PVS top bar includes toggle checkboxes: **ACC**, **GYR**, **MAG**, **PPI**. 
 
 ## TicWatch Support
 
-The app supports two **TicWatch** smartwatches (Left and Right) running a custom Wear OS app that streams IMU data over a **TCP connection via ADB tunnel**.  Each watch is a fully **independent device** — you can use just one or both at the same time.
+The app supports two **TicWatch** smartwatches (Left and Right) running a custom Wear OS app that streams IMU data.  Each watch is a fully **independent device** — you can use just one or both at the same time.
 
-### How it works (ADB reverse tunnel)
+Two connection modes are supported, selectable per watch via a dropdown before clicking **Start**:
+
+| Mode | Transport | When to use |
+|------|-----------|-------------|
+| **ADB** (default) | TCP via `adb reverse` tunnel | Watch connected to host via USB / ADB Wi-Fi |
+| **UDP** | Direct UDP over Wi-Fi | Both devices on the same network, no USB needed |
+
+Ports are **hardcoded**: Left = **5555**, Right = **5556**.
+
+### ADB mode — setup (run once per watch per session)
 The host runs a **TCP server**; the watch is the TCP client.  `adb reverse` makes the watch's loopback address point back to the host, so no Wi-Fi IP address is ever needed.
 
 ```
 Watch app  →  adb reverse  →  host localhost:PORT  →  our TCP server
 ```
 
-Ports are **hardcoded**: Left = **5555**, Right = **5556**.
-
-### Setup — run once per watch per session (in a terminal)
 ```bash
 # Left watch  → port 5555
 adb -s <LEFT_WATCH_SERIAL>  reverse tcp:5555 tcp:5555
@@ -128,8 +134,11 @@ adb -s <RIGHT_WATCH_SERIAL> reverse tcp:5556 tcp:5556
 
 Find serial numbers with `adb devices`.  If only one watch is connected you can omit `-s <serial>`.
 
+### UDP mode — setup
+No ADB setup required.  Configure the watch app to send UDP datagrams to the host's IP address on port **5555** (Left) or **5556** (Right).  Both devices must be on the same Wi-Fi network.
+
 ### Protocol
-The watch sends newline-terminated UTF-8 lines:
+The watch sends newline-terminated UTF-8 lines (same format for both modes):
 
 ```
 "A,x.xx,y.yy,z.zz\n"   — Accelerometer
@@ -137,17 +146,18 @@ The watch sends newline-terminated UTF-8 lines:
 ```
 
 ### UI Controls
-Each watch has its **own separate top bar row** — no configuration needed:
+Each watch has its **own separate top bar row**:
 
 | Row | Colour | Controls |
 |-----|--------|----------|
-| **TicWatch Left** | Purple/violet | port label · status dot · **Start / Stop** |
-| **TicWatch Right** | Cyan/teal | port label · status dot · **Start / Stop** |
+| **TicWatch Left** | Purple/violet | port label · **ADB/UDP dropdown** · status dot · **Start / Stop** |
+| **TicWatch Right** | Cyan/teal | port label · **ADB/UDP dropdown** · status dot · **Start / Stop** |
 
-- Click **Start** to open the TCP server and wait for the watch to connect.
+- Select **ADB** or **UDP** from the dropdown *before* clicking Start.  The dropdown is locked while the listener is running.
+- Click **Start** to open the server and wait for the watch to connect.
 - The status dot turns **yellow** while waiting, **green** when streaming, **red** when stopped.
 - Starting or stopping one watch has no effect on the other.
-- If the watch app is restarted, the server automatically accepts the new connection — no need to click Stop/Start again.
+- In ADB mode, if the watch app is restarted the server automatically accepts the new connection — no need to click Stop/Start again.
 
 ### Charts
 Each watch has its own collapsible graph subsection that appears automatically when data arrives and hides when the listener is stopped:
@@ -161,8 +171,8 @@ Both watches are available as independent trigger sources in the LTX Controller:
 - **TicWatch Right** — Accelerometer, Gyroscope, Magnetometer
 
 ### Files
-- **`src/ble/ticwatch_manager.py`**: `SingleTicWatchManager` — TCP server per watch. Ports hardcoded (`PORT_LEFT=5555`, `PORT_RIGHT=5556`). Accepts one connection at a time; re-listens automatically after disconnect. No config file needed.
-- **`src/gui/ticwatch_bar.py`**: `TicWatchLeftBar` (purple) and `TicWatchRightBar` (cyan) — each an independent bar row with port label, status dot, and Start/Stop button.
+- **`src/ble/ticwatch_manager.py`**: `SingleTicWatchManager` — per-watch server supporting ADB (TCP) and UDP modes. Call `set_mode(MODE_ADB)` or `set_mode(MODE_UDP)` before `start()`. Ports hardcoded (`PORT_LEFT=5555`, `PORT_RIGHT=5556`). In ADB mode accepts one TCP connection at a time and re-listens automatically after disconnect. In UDP mode receives datagrams continuously.
+- **`src/gui/ticwatch_bar.py`**: `TicWatchLeftBar` (purple) and `TicWatchRightBar` (cyan) — each an independent bar row with port label, ADB/UDP mode dropdown, status dot, and Start/Stop button. The dropdown is disabled while the listener is running.
 - **`src/gui/ticwatch_charts.py`**: Chart widgets for both watches: `TicWatchLeftAccChart`, `TicWatchLeftGyroChart`, `TicWatchLeftMagChart`, `TicWatchRightAccChart`, `TicWatchRightGyroChart`, `TicWatchRightMagChart`.
 
 ## Architecture
@@ -223,6 +233,8 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
+2026-02-22 10:03 CET — **TicWatch: ADB/UDP mode selection**. `SingleTicWatchManager` now supports both ADB (TCP via `adb reverse`) and WiFi (UDP) connection modes. A new `set_mode()` method selects the mode before `start()`. Each TicWatch bar row gains an **ADB / UDP dropdown** that is locked while the listener is running. The mode is applied at connect time; status messages include the active mode label (e.g. "Waiting for watch… (UDP)"). No changes to ports, protocol, or chart code.
+
 2026-02-21 19:27 CET — **TicWatch finalised: hardcoded ports, adb reverse, no config needed**. Ports are now hardcoded (Left=5555, Right=5556) — no port inputs in the UI. Corrected ADB command from `forward` to `reverse`. Removed all port config persistence. Bar rows simplified to label + status dot + Start/Stop only.
 
 2026-02-21 19:18 CET — **TicWatch protocol corrected to TCP/ADB tunnel**. The working test (`tests/test_ticwatch.py`) revealed the protocol is TCP (not UDP): the host is the TCP server, the watch connects via `adb reverse`. Rewrote `src/ble/ticwatch_manager.py` as a per-device TCP server (`SingleTicWatchManager`) that accepts one connection at a time and re-listens automatically after disconnect. No IP address is ever needed — the ADB tunnel always connects to localhost.

@@ -4,13 +4,16 @@ Each TicWatch device gets its own independent bar row:
   - TicWatchLeftBar  — purple/violet, port 5555
   - TicWatchRightBar — cyan/teal,     port 5556
 
-Ports are hardcoded — no user input needed.  The user only needs to run
-the correct `adb reverse` command in a terminal before clicking Start.
+A dropdown lets the user choose ADB (TCP via adb reverse tunnel) or
+UDP (direct WiFi) before clicking Start.  The mode is applied to the
+manager at connect time; it cannot be changed while the manager is running.
 """
 
 import dearpygui.dearpygui as dpg
 import logging
 from typing import TYPE_CHECKING
+
+from src.ble.ticwatch_manager import MODE_ADB, MODE_UDP
 
 if TYPE_CHECKING:
     from src.ble.ticwatch_manager import SingleTicWatchManager
@@ -19,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 _COLOR_LEFT  = (180, 100, 255)   # purple/violet
 _COLOR_RIGHT = (0,   210, 210)   # cyan/teal
+
+_MODE_OPTIONS = ["ADB", "UDP"]
 
 
 class TicWatchLeftBar:
@@ -32,7 +37,14 @@ class TicWatchLeftBar:
         with dpg.group(horizontal=True):
             dpg.add_text("TicWatch Left", color=_COLOR_LEFT)
             dpg.add_text(f"(port {self.manager.port})", color=(120, 70, 180))
-            dpg.add_spacer(width=10)
+            dpg.add_spacer(width=6)
+            dpg.add_combo(
+                items=_MODE_OPTIONS,
+                default_value="ADB",
+                tag="tw_left_mode",
+                width=60,
+            )
+            dpg.add_spacer(width=6)
             dpg.add_text("●", tag="tw_left_dot", color=(255, 0, 0))
             dpg.add_text("Stopped", tag="tw_left_status_text", color=(255, 0, 0))
             dpg.add_spacer(width=10)
@@ -43,11 +55,16 @@ class TicWatchLeftBar:
         if self.manager.running:
             self.manager.stop()
             dpg.configure_item("tw_left_btn", label="Start")
+            dpg.configure_item("tw_left_mode", enabled=True)
             self._apply_status("Stopped", False)
         else:
+            selected = dpg.get_value("tw_left_mode")
+            self.manager.set_mode(MODE_UDP if selected == "UDP" else MODE_ADB)
             self.manager.start()
             dpg.configure_item("tw_left_btn", label="Stop")
-            self._apply_status("Waiting for watch…", None)
+            dpg.configure_item("tw_left_mode", enabled=False)
+            label = "Waiting for watch… (ADB)" if selected == "ADB" else "Waiting for watch… (UDP)"
+            self._apply_status(label, None)
 
     def poll_status(self):
         status = self.manager.status()
@@ -84,7 +101,14 @@ class TicWatchRightBar:
         with dpg.group(horizontal=True):
             dpg.add_text("TicWatch Right", color=_COLOR_RIGHT)
             dpg.add_text(f"(port {self.manager.port})", color=(0, 140, 140))
-            dpg.add_spacer(width=10)
+            dpg.add_spacer(width=6)
+            dpg.add_combo(
+                items=_MODE_OPTIONS,
+                default_value="ADB",
+                tag="tw_right_mode",
+                width=60,
+            )
+            dpg.add_spacer(width=6)
             dpg.add_text("●", tag="tw_right_dot", color=(255, 0, 0))
             dpg.add_text("Stopped", tag="tw_right_status_text", color=(255, 0, 0))
             dpg.add_spacer(width=10)
@@ -95,11 +119,16 @@ class TicWatchRightBar:
         if self.manager.running:
             self.manager.stop()
             dpg.configure_item("tw_right_btn", label="Start")
+            dpg.configure_item("tw_right_mode", enabled=True)
             self._apply_status("Stopped", False)
         else:
+            selected = dpg.get_value("tw_right_mode")
+            self.manager.set_mode(MODE_UDP if selected == "UDP" else MODE_ADB)
             self.manager.start()
             dpg.configure_item("tw_right_btn", label="Stop")
-            self._apply_status("Waiting for watch…", None)
+            dpg.configure_item("tw_right_mode", enabled=False)
+            label = "Waiting for watch… (ADB)" if selected == "ADB" else "Waiting for watch… (UDP)"
+            self._apply_status(label, None)
 
     def poll_status(self):
         status = self.manager.status()
