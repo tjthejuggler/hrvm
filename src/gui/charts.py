@@ -1,6 +1,10 @@
 """
 Collapsible chart widgets for the HRV Biofeedback GUI.
 Each chart is a collapsible tree node containing a DearPyGui plot.
+
+Collapsed-state optimization: update_plot() checks whether the tree node
+is open before doing any DPG set_value / axis-limit calls, so collapsed
+charts consume no CPU for rendering.
 """
 import dearpygui.dearpygui as dpg
 import numpy as np
@@ -20,6 +24,16 @@ class CollapsibleChart:
     def build(self, parent):
         """Override in subclass to build chart inside the tree node."""
         raise NotImplementedError
+
+    def is_visible(self) -> bool:
+        """Return True if the tree node exists and is currently open.
+
+        dpg.get_value() on a tree_node returns the open/closed boolean.
+        Falls back to True if the item doesn't exist yet (safe default).
+        """
+        if not dpg.does_item_exist(self.node_tag):
+            return True  # not built yet — don't suppress data
+        return bool(dpg.get_value(self.node_tag))
 
 
 class BiofeedbackChart(CollapsibleChart):
@@ -45,11 +59,7 @@ class BiofeedbackChart(CollapsibleChart):
 
 
 class HeartbeatChart(CollapsibleChart):
-    """Shows individual heartbeats with timing and RR intervals.
-
-    Displays a stem/marker plot where each beat is a vertical line at
-    the time it occurred, with the RR interval (ms) shown as the Y value.
-    """
+    """Shows individual heartbeats with timing and RR intervals."""
 
     def __init__(self):
         super().__init__("Heartbeats (RR Intervals)", "heartbeat", default_open=True)
@@ -71,7 +81,6 @@ class HeartbeatChart(CollapsibleChart):
                     dpg.set_axis_limits("hb_y_axis", 400, 1200)
 
     def add_beats(self, timestamp: float, rr_intervals: List[float], start_time: float):
-        """Add new beats from an HR notification."""
         current_time = timestamp - start_time
         for rr in rr_intervals:
             if 300 < rr < 2000:
@@ -80,13 +89,11 @@ class HeartbeatChart(CollapsibleChart):
                 self.beat_hr.append(60000.0 / rr if rr > 0 else 0)
 
     def update_plot(self, current_time_offset: float):
-        """Refresh the plot data."""
-        if len(self.beat_times) == 0:
+        if not self.is_visible() or len(self.beat_times) == 0:
             return
         times = list(self.beat_times)
         rr_vals = list(self.beat_rr)
         dpg.set_value("hb_rr_series", [times, rr_vals])
-        # Auto-scroll X axis to show last 60 seconds
         dpg.set_axis_limits("hb_x_axis", max(0, current_time_offset - 60), current_time_offset + 5)
         dpg.fit_axis_data("hb_y_axis")
 
@@ -96,11 +103,9 @@ class TachogramChart(CollapsibleChart):
 
     def __init__(self):
         super().__init__("RR Tachogram", "tachogram", default_open=False)
-        # ~60s at ~1 beat/sec = ~60 beats; use 120 for safety
         self.max_beats = 120
         self.rr_times: deque = deque(maxlen=self.max_beats)
         self.rr_history: deque = deque(maxlen=self.max_beats)
-        self._start_time: Optional[float] = None
 
     def build(self, parent):
         with dpg.tree_node(
@@ -120,7 +125,7 @@ class TachogramChart(CollapsibleChart):
                 self.rr_history.append(rr)
 
     def update_plot(self, current_time: Optional[float] = None):
-        if len(self.rr_history) == 0:
+        if not self.is_visible() or len(self.rr_history) == 0:
             return
         t = list(self.rr_times)
         dpg.set_value("rr_series", [t, list(self.rr_history)])
@@ -136,7 +141,6 @@ class PoincareChart(CollapsibleChart):
 
     def __init__(self):
         super().__init__("Poincaré Plot", "poincare", default_open=False)
-        # Keep last ~120 pairs (~60-120s of data)
         self.px: deque = deque(maxlen=120)
         self.py: deque = deque(maxlen=120)
         self._last_rr = None
@@ -160,7 +164,7 @@ class PoincareChart(CollapsibleChart):
                 self._last_rr = rr
 
     def update_plot(self):
-        if len(self.px) == 0:
+        if not self.is_visible() or len(self.px) == 0:
             return
         dpg.set_value("poincare_series", [list(self.px), list(self.py)])
         dpg.fit_axis_data("poincare_x_axis")
@@ -191,7 +195,7 @@ class RMSSDHistoryChart(CollapsibleChart):
         self.rmssd_history.append(rmssd)
 
     def update_plot(self):
-        if len(self.time_history) == 0:
+        if not self.is_visible() or len(self.time_history) == 0:
             return
         t = list(self.time_history)
         min_len = min(len(t), len(self.rmssd_history))
@@ -225,7 +229,7 @@ class SDNNHistoryChart(CollapsibleChart):
         self.sdnn_history.append(sdnn)
 
     def update_plot(self):
-        if len(self.time_history) == 0:
+        if not self.is_visible() or len(self.time_history) == 0:
             return
         t = list(self.time_history)
         min_len = min(len(t), len(self.sdnn_history))
@@ -259,7 +263,7 @@ class CoherenceHistoryChart(CollapsibleChart):
         self.coherence_history.append(coherence)
 
     def update_plot(self):
-        if len(self.time_history) == 0:
+        if not self.is_visible() or len(self.time_history) == 0:
             return
         t = list(self.time_history)
         min_len = min(len(t), len(self.coherence_history))
@@ -271,9 +275,7 @@ class CoherenceHistoryChart(CollapsibleChart):
 
 # ---------------------------------------------------------------------------
 # HRV Section Charts
-# These are device-agnostic HRV charts shown in the dedicated HRV section.
-# They receive data from whichever HR source is active (H10 preferred, PVS fallback).
-# All use a ~60s scrolling window.
+# Device-agnostic HRV charts shown in the dedicated HRV section.
 # ---------------------------------------------------------------------------
 
 class HRVTachogramChart(CollapsibleChart):
@@ -302,7 +304,7 @@ class HRVTachogramChart(CollapsibleChart):
                 self.rr_history.append(rr)
 
     def update_plot(self, current_time: float):
-        if not self.rr_history:
+        if not self.is_visible() or not self.rr_history:
             return
         dpg.set_value("hrv_rr_series", [list(self.rr_times), list(self.rr_history)])
         dpg.set_axis_limits("hrv_rr_x_axis", max(0, current_time - 60), current_time + 5)
@@ -339,7 +341,7 @@ class HRVPoincareChart(CollapsibleChart):
                 self._last_rr = rr
 
     def update_plot(self):
-        if not self.px:
+        if not self.is_visible() or not self.px:
             return
         dpg.set_value("hrv_poincare_series", [list(self.px), list(self.py)])
         dpg.fit_axis_data("hrv_poincare_x_axis")
@@ -369,7 +371,7 @@ class HRVRMSSDChart(CollapsibleChart):
         self.rmssd_history.append(rmssd)
 
     def update_plot(self):
-        if not self.time_history:
+        if not self.is_visible() or not self.time_history:
             return
         t = list(self.time_history)
         min_len = min(len(t), len(self.rmssd_history))
@@ -402,7 +404,7 @@ class HRVSDNNChart(CollapsibleChart):
         self.sdnn_history.append(sdnn)
 
     def update_plot(self):
-        if not self.time_history:
+        if not self.is_visible() or not self.time_history:
             return
         t = list(self.time_history)
         min_len = min(len(t), len(self.sdnn_history))
@@ -435,7 +437,7 @@ class HRVCoherenceChart(CollapsibleChart):
         self.coherence_history.append(coherence)
 
     def update_plot(self):
-        if not self.time_history:
+        if not self.is_visible() or not self.time_history:
             return
         t = list(self.time_history)
         min_len = min(len(t), len(self.coherence_history))
@@ -446,90 +448,5 @@ class HRVCoherenceChart(CollapsibleChart):
         dpg.fit_axis_data("hrv_coherence_y_axis")
 
 
-class ACCChart(CollapsibleChart):
-    """3-axis accelerometer chart from Polar H10 PMD service."""
-
-    def __init__(self):
-        super().__init__("Accelerometer (IMU)", "acc", default_open=True)
-        self.max_samples = 500  # ~20 seconds at 25Hz
-        self.acc_time: deque = deque(maxlen=self.max_samples)
-        self.acc_x: deque = deque(maxlen=self.max_samples)
-        self.acc_y: deque = deque(maxlen=self.max_samples)
-        self.acc_z: deque = deque(maxlen=self.max_samples)
-
-    def build(self, parent):
-        with dpg.tree_node(
-            label=self.label, parent=parent, tag=self.node_tag,
-            default_open=self.default_open
-        ):
-            with dpg.plot(label="Accelerometer (mG)", height=250, width=-1, tag="acc_plot"):
-                dpg.add_plot_legend()
-                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="acc_x_axis")
-                with dpg.plot_axis(dpg.mvYAxis, label="Acceleration (mG)", tag="acc_y_axis"):
-                    dpg.add_line_series([], [], label="X", tag="acc_x_series")
-                    dpg.add_line_series([], [], label="Y", tag="acc_y_series")
-                    dpg.add_line_series([], [], label="Z", tag="acc_z_series")
-
-    def add_samples(self, timestamp: float, samples: List[Tuple[int, int, int]],
-                    sample_rate: int, start_time: float):
-        """Add ACC samples from a batch."""
-        base_time = timestamp - start_time
-        dt = 1.0 / sample_rate if sample_rate > 0 else 0.04
-        for i, (x, y, z) in enumerate(samples):
-            t = base_time + i * dt
-            self.acc_time.append(t)
-            self.acc_x.append(x)
-            self.acc_y.append(y)
-            self.acc_z.append(z)
-
-    def update_plot(self, current_time_offset: float):
-        if len(self.acc_time) == 0:
-            return
-        t = list(self.acc_time)
-        dpg.set_value("acc_x_series", [t, list(self.acc_x)])
-        dpg.set_value("acc_y_series", [t, list(self.acc_y)])
-        dpg.set_value("acc_z_series", [t, list(self.acc_z)])
-        # Auto-scroll to last 20 seconds
-        dpg.set_axis_limits("acc_x_axis", max(0, current_time_offset - 20), current_time_offset + 2)
-        dpg.fit_axis_data("acc_y_axis")
-
-
-class ECGChart(CollapsibleChart):
-    """Real-time ECG waveform chart from Polar H10 PMD service (130 Hz)."""
-
-    def __init__(self):
-        super().__init__("ECG Waveform", "ecg", default_open=True)
-        # ~5 seconds of ECG at 130Hz = 650 samples
-        self.max_samples = 650
-        self.ecg_time: deque = deque(maxlen=self.max_samples)
-        self.ecg_val: deque = deque(maxlen=self.max_samples)
-
-    def build(self, parent):
-        with dpg.tree_node(
-            label=self.label, parent=parent, tag=self.node_tag,
-            default_open=self.default_open
-        ):
-            with dpg.plot(label="ECG (µV)", height=250, width=-1, tag="ecg_plot"):
-                dpg.add_plot_legend()
-                dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="ecg_x_axis")
-                with dpg.plot_axis(dpg.mvYAxis, label="Amplitude (µV)", tag="ecg_y_axis"):
-                    dpg.add_line_series([], [], label="ECG", tag="ecg_series")
-
-    def add_samples(self, timestamp: float, samples: list,
-                    sample_rate: int, start_time: float):
-        """Add ECG samples from a batch."""
-        base_time = timestamp - start_time
-        dt = 1.0 / sample_rate if sample_rate > 0 else 1.0 / 130.0
-        for i, val in enumerate(samples):
-            t = base_time + i * dt
-            self.ecg_time.append(t)
-            self.ecg_val.append(val)
-
-    def update_plot(self, current_time_offset: float):
-        if len(self.ecg_time) == 0:
-            return
-        t = list(self.ecg_time)
-        dpg.set_value("ecg_series", [t, list(self.ecg_val)])
-        # Auto-scroll to last 5 seconds
-        dpg.set_axis_limits("ecg_x_axis", max(0, current_time_offset - 5), current_time_offset + 0.5)
-        dpg.fit_axis_data("ecg_y_axis")
+# ACC and ECG charts moved to h10_imu_charts.py
+# Import them from there for backwards compatibility if needed.

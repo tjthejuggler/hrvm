@@ -25,9 +25,9 @@ from src.gui.audio_feedback import AudioFeedback
 from src.gui.charts import (
     BiofeedbackChart, HeartbeatChart, TachogramChart, PoincareChart,
     RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart,
-    ACCChart, ECGChart,
     HRVTachogramChart, HRVPoincareChart, HRVRMSSDChart, HRVSDNNChart, HRVCoherenceChart,
 )
+from src.gui.h10_imu_charts import ACCChart, ACCXChart, ACCYChart, ACCZChart, ECGChart
 from src.gui.counting_game import CountingGameWidget
 from src.gui.rapid_change_game import RapidChangeWidget
 from src.gui.resonance_breathing import ResonanceBreathingWidget
@@ -149,6 +149,9 @@ class UIManager:
         self.sdnn_chart = SDNNHistoryChart()
         self.coherence_chart = CoherenceHistoryChart()
         self.acc_chart = ACCChart()
+        self.acc_x_chart = ACCXChart()
+        self.acc_y_chart = ACCYChart()
+        self.acc_z_chart = ACCZChart()
         self.ecg_chart = ECGChart()
 
         # HRV section charts (device-agnostic, H10 preferred / PVS fallback)
@@ -377,6 +380,9 @@ class UIManager:
                             self.biofeedback_chart.build("polar_h10_graphs_container")
                             self.heartbeat_chart.build("polar_h10_graphs_container")
                             self.acc_chart.build("polar_h10_graphs_container")
+                            self.acc_x_chart.build("polar_h10_graphs_container")
+                            self.acc_y_chart.build("polar_h10_graphs_container")
+                            self.acc_z_chart.build("polar_h10_graphs_container")
                             self.ecg_chart.build("polar_h10_graphs_container")
                             self.tachogram_chart.build("polar_h10_graphs_container")
                             self.poincare_chart.build("polar_h10_graphs_container")
@@ -817,9 +823,27 @@ class UIManager:
     def handle_acc_data(self, batch: ACCBatch):
         """Handle accelerometer data from BLE."""
         current_time = time.time() - self.start_time
+
+        # Feed samples into all ACC charts (each chart skips rendering if collapsed)
         self.acc_chart.add_samples(batch.timestamp_unix, batch.samples,
                                    batch.sample_rate, self.start_time)
         self.acc_chart.update_plot(current_time)
+
+        # Individual axis charts share the same sample data
+        base_time = batch.timestamp_unix - self.start_time
+        dt = 1.0 / batch.sample_rate if batch.sample_rate > 0 else 0.04
+        for i, (x, y, z) in enumerate(batch.samples):
+            t = base_time + i * dt
+            self.acc_x_chart.acc_time.append(t)
+            self.acc_x_chart.acc_x.append(x)
+            self.acc_y_chart.acc_time.append(t)
+            self.acc_y_chart.acc_y.append(y)
+            self.acc_z_chart.acc_time.append(t)
+            self.acc_z_chart.acc_z.append(z)
+
+        self.acc_x_chart.update_plot(current_time)
+        self.acc_y_chart.update_plot(current_time)
+        self.acc_z_chart.update_plot(current_time)
 
         # Batch samples are typically (N, 3). Take the last one.
         if len(batch.samples) > 0:
