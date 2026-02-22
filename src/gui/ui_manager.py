@@ -44,6 +44,12 @@ from src.gui.pvs_charts import (
     PVSAccChart, PVSGyroChart, PVSMagChart, PVSPPIChart,
     PVSHeartRateChart,
 )
+from src.ble.ticwatch_manager import SingleTicWatchManager, PORT_LEFT, PORT_RIGHT
+from src.gui.ticwatch_bar import TicWatchLeftBar, TicWatchRightBar
+from src.gui.ticwatch_charts import (
+    TicWatchLeftAccChart, TicWatchLeftGyroChart, TicWatchLeftMagChart,
+    TicWatchRightAccChart, TicWatchRightGyroChart, TicWatchRightMagChart,
+)
 from src.gui.ltx_controller import LTXApp
 
 logger = logging.getLogger(__name__)
@@ -181,6 +187,20 @@ class UIManager:
         self.pvs_ppi_chart = PVSPPIChart()
         self.pvs_hr_chart = PVSHeartRateChart()
 
+        # TicWatch Left — independent device (port 5555)
+        self.tw_left_manager  = SingleTicWatchManager("left", PORT_LEFT)
+        self.tw_left_bar      = TicWatchLeftBar(self.tw_left_manager)
+        self.tw_left_acc_chart   = TicWatchLeftAccChart()
+        self.tw_left_gyro_chart  = TicWatchLeftGyroChart()
+        self.tw_left_mag_chart   = TicWatchLeftMagChart()
+
+        # TicWatch Right — independent device (port 5556)
+        self.tw_right_manager = SingleTicWatchManager("right", PORT_RIGHT)
+        self.tw_right_bar     = TicWatchRightBar(self.tw_right_manager)
+        self.tw_right_acc_chart  = TicWatchRightAccChart()
+        self.tw_right_gyro_chart = TicWatchRightGyroChart()
+        self.tw_right_mag_chart  = TicWatchRightMagChart()
+
         # UI Element Tags
         self.window_tag = "Primary Window"
         self.assessment_status_tag = "Assessment Status"
@@ -269,6 +289,14 @@ class UIManager:
 
             # --- Polar Verity Sense Top Bar ---
             self.pvs_bar.build()
+            dpg.add_separator()
+
+            # --- TicWatch Left Top Bar ---
+            self.tw_left_bar.build()
+            dpg.add_separator()
+
+            # --- TicWatch Right Top Bar ---
+            self.tw_right_bar.build()
             dpg.add_separator()
 
             # --- Session Metrics Bar (large numbers, horizontal) ---
@@ -377,6 +405,28 @@ class UIManager:
                             self.pvs_mag_chart.build("pvs_graphs_container")
                             self.pvs_ppi_chart.build("pvs_graphs_container")
                             self.pvs_hr_chart.build("pvs_graphs_container")
+
+                    # --- TicWatch Left Device Subsection ---
+                    with dpg.collapsing_header(label="TicWatch Left",
+                                               tag="header_ticwatch_left",
+                                               default_open=True, show=False):
+                        dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
+
+                        with dpg.group(tag="ticwatch_left_graphs_container"):
+                            self.tw_left_acc_chart.build("ticwatch_left_graphs_container")
+                            self.tw_left_gyro_chart.build("ticwatch_left_graphs_container")
+                            self.tw_left_mag_chart.build("ticwatch_left_graphs_container")
+
+                    # --- TicWatch Right Device Subsection ---
+                    with dpg.collapsing_header(label="TicWatch Right",
+                                               tag="header_ticwatch_right",
+                                               default_open=True, show=False):
+                        dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
+
+                        with dpg.group(tag="ticwatch_right_graphs_container"):
+                            self.tw_right_acc_chart.build("ticwatch_right_graphs_container")
+                            self.tw_right_gyro_chart.build("ticwatch_right_graphs_container")
+                            self.tw_right_mag_chart.build("ticwatch_right_graphs_container")
 
                 with dpg.theme(tag="theme_graphs_header"):
                     with dpg.theme_component(dpg.mvCollapsingHeader):
@@ -528,6 +578,7 @@ class UIManager:
             self._update_heartbeat_blink()
             self._poll_genki_wave()
             self._poll_pvs()
+            self._poll_ticwatch()
 
             # App ticks
             self.counting_game.tick()
@@ -541,6 +592,8 @@ class UIManager:
             self.audio_feedback.stop()
         self.genki_manager.shutdown()
         self.pvs_manager.shutdown()
+        self.tw_left_manager.stop()
+        self.tw_right_manager.stop()
         if self.shm:
             self.shm.close()
         dpg.destroy_context()
@@ -1127,6 +1180,32 @@ class UIManager:
             self.genki_gyro_sum_chart.update_plot()
 
             self.ltx_app.feed_genki_data(samples)
+
+    # --- TicWatch Polling ---
+
+    def _poll_ticwatch(self):
+        """Poll each TicWatch independently each frame."""
+        self.tw_left_bar.poll_status()
+        left_samples = self.tw_left_manager.poll()
+        if left_samples:
+            self.tw_left_acc_chart.add_samples(left_samples)
+            self.tw_left_acc_chart.update_plot()
+            self.tw_left_gyro_chart.add_samples(left_samples)
+            self.tw_left_gyro_chart.update_plot()
+            self.tw_left_mag_chart.add_samples(left_samples)
+            self.tw_left_mag_chart.update_plot()
+            self.ltx_app.feed_ticwatch_data("left", left_samples)
+
+        self.tw_right_bar.poll_status()
+        right_samples = self.tw_right_manager.poll()
+        if right_samples:
+            self.tw_right_acc_chart.add_samples(right_samples)
+            self.tw_right_acc_chart.update_plot()
+            self.tw_right_gyro_chart.add_samples(right_samples)
+            self.tw_right_gyro_chart.update_plot()
+            self.tw_right_mag_chart.add_samples(right_samples)
+            self.tw_right_mag_chart.update_plot()
+            self.ltx_app.feed_ticwatch_data("right", right_samples)
 
     # --- Polar Verity Sense Polling ---
 

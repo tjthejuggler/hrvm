@@ -104,6 +104,67 @@ The PVS top bar includes toggle checkboxes: **ACC**, **GYR**, **MAG**, **PPI**. 
 - **PVS PPI (ms):** Pulse-to-pulse intervals as stem plot (Normal mode only)
 - **PVS Heart Rate (BPM):** HR from BLE HR service or PPI stream
 
+## TicWatch Support
+
+The app supports two **TicWatch** smartwatches (Left and Right) running a custom Wear OS app that streams IMU data over a **TCP connection via ADB tunnel**.  Each watch is a fully **independent device** — you can use just one or both at the same time.
+
+### How it works (ADB reverse tunnel)
+The host runs a **TCP server**; the watch is the TCP client.  `adb reverse` makes the watch's loopback address point back to the host, so no Wi-Fi IP address is ever needed.
+
+```
+Watch app  →  adb reverse  →  host localhost:PORT  →  our TCP server
+```
+
+Ports are **hardcoded**: Left = **5555**, Right = **5556**.
+
+### Setup — run once per watch per session (in a terminal)
+```bash
+# Left watch  → port 5555
+adb -s <LEFT_WATCH_SERIAL>  reverse tcp:5555 tcp:5555
+
+# Right watch → port 5556
+adb -s <RIGHT_WATCH_SERIAL> reverse tcp:5556 tcp:5556
+```
+
+Find serial numbers with `adb devices`.  If only one watch is connected you can omit `-s <serial>`.
+
+### Protocol
+The watch sends newline-terminated UTF-8 lines:
+
+```
+"A,x.xx,y.yy,z.zz\n"   — Accelerometer
+"G,x.xx,y.yy,z.zz\n"   — Gyroscope
+```
+
+### UI Controls
+Each watch has its **own separate top bar row** — no configuration needed:
+
+| Row | Colour | Controls |
+|-----|--------|----------|
+| **TicWatch Left** | Purple/violet | port label · status dot · **Start / Stop** |
+| **TicWatch Right** | Cyan/teal | port label · status dot · **Start / Stop** |
+
+- Click **Start** to open the TCP server and wait for the watch to connect.
+- The status dot turns **yellow** while waiting, **green** when streaming, **red** when stopped.
+- Starting or stopping one watch has no effect on the other.
+- If the watch app is restarted, the server automatically accepts the new connection — no need to click Stop/Start again.
+
+### Charts
+Each watch has its own collapsible graph subsection that appears automatically when data arrives and hides when the listener is stopped:
+- **TW Left/Right Acc (m/s²):** 3-axis accelerometer, 20s scrolling window
+- **TW Left/Right Gyro (rad/s):** 3-axis gyroscope, 20s scrolling window
+- **TW Left/Right Mag (µT):** 3-axis magnetometer, 20s scrolling window
+
+### LTX Controller Integration
+Both watches are available as independent trigger sources in the LTX Controller:
+- **TicWatch Left** — Accelerometer, Gyroscope, Magnetometer
+- **TicWatch Right** — Accelerometer, Gyroscope, Magnetometer
+
+### Files
+- **`src/ble/ticwatch_manager.py`**: `SingleTicWatchManager` — TCP server per watch. Ports hardcoded (`PORT_LEFT=5555`, `PORT_RIGHT=5556`). Accepts one connection at a time; re-listens automatically after disconnect. No config file needed.
+- **`src/gui/ticwatch_bar.py`**: `TicWatchLeftBar` (purple) and `TicWatchRightBar` (cyan) — each an independent bar row with port label, status dot, and Start/Stop button.
+- **`src/gui/ticwatch_charts.py`**: Chart widgets for both watches: `TicWatchLeftAccChart`, `TicWatchLeftGyroChart`, `TicWatchLeftMagChart`, `TicWatchRightAccChart`, `TicWatchRightGyroChart`, `TicWatchRightMagChart`.
+
 ## Architecture
 - **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, D-Bus `StartNotify` for reliable PMD streaming, and automatic reconnection with exponential backoff on unexpected disconnects. Also manages the Polar Verity Sense via `pvs_manager.py` using SDK Mode.
 - **`src/ble/pvs_manager.py`**: `PolarVeritySenseManager` manages PVS BLE connection in a background thread. Supports two mutually exclusive modes: SDK Mode (ACC/GYR/MAG) and Normal Mode (PPI). Sends `SDK_MODE_DISABLE` before PPI start to clear stale device state. Uses the device's own `timestamp_ns` (from the PMD packet header) to compute per-sample timestamps via `_device_ts_to_wall()`, eliminating backwards-going timestamps caused by per-packet `time.time()` jitter when ACC and GYR packets arrive interleaved.
@@ -162,6 +223,12 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
+2026-02-21 19:27 CET — **TicWatch finalised: hardcoded ports, adb reverse, no config needed**. Ports are now hardcoded (Left=5555, Right=5556) — no port inputs in the UI. Corrected ADB command from `forward` to `reverse`. Removed all port config persistence. Bar rows simplified to label + status dot + Start/Stop only.
+
+2026-02-21 19:18 CET — **TicWatch protocol corrected to TCP/ADB tunnel**. The working test (`tests/test_ticwatch.py`) revealed the protocol is TCP (not UDP): the host is the TCP server, the watch connects via `adb reverse`. Rewrote `src/ble/ticwatch_manager.py` as a per-device TCP server (`SingleTicWatchManager`) that accepts one connection at a time and re-listens automatically after disconnect. No IP address is ever needed — the ADB tunnel always connects to localhost.
+
+2026-02-21 14:55 CET — **TicWatch Left & Right integration (independent devices)**. Each TicWatch is now a fully independent device with its own top bar row (Left=purple, Right=cyan), its own port input, its own Start/Stop button, and its own graph subsection. New files: `src/ble/ticwatch_manager.py`, `src/gui/ticwatch_bar.py` (`TicWatchLeftBar` + `TicWatchRightBar`), `src/gui/ticwatch_charts.py`. Both watches integrated into `ui_manager.py` render loop and LTX Controller trigger sources.
+
 2026-02-21 10:42 CET — **UI polish: resonance breathing info panel, record button labels, persistent recording types**. Three changes in this update: (1) **Resonance Breathing info panel** — replaced the single small timing text line with a horizontal panel of five large (size-22 font) labelled metrics: INHALE (seconds), EXHALE (seconds), RATE (BPM), RATIO (1:N), and TIME LEFT (MM:SS). All five update live during assessment and manual breathing sessions. (2) **Record/Stop button labels** — replaced the `⏺`/`⏹` Unicode symbols (which rendered as `?` on the system font) with plain ASCII `[REC]` and `[STOP]` labels. (3) **Persistent recording types** — custom recording-type labels added via the `+ Add` popup are now saved to `recording_types.json` in the project root and reloaded on every app start, so they survive restarts.
 
 2026-02-20 15:53 CET — **Graph fixes: coherence saw-teeth & HR Y-axis range**. Fixed the coherence score graph dropping to 0 between updates (saw-tooth pattern): the signal processor now carries forward the last valid coherence score instead of emitting 0.0 on every HR batch that falls within the 1-second throttle window. A score of 0.0 is only used as the initial value before any valid reading arrives. Fixed the HR (Heart Rate & Pacer) chart Y-axis being too wide: instead of a hard-coded 40–120 BPM range, the Y-axis is now dynamically set to ±10% of the actual data range visible in the chart (with a minimum 2 BPM margin), updated on every new HR data point.

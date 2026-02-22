@@ -19,10 +19,12 @@ class GestureType(Enum):
 DEV_H10 = "Polar H10"
 DEV_PVS = "Polar Verity Sense"
 DEV_GENKI = "Genki Wave"
+DEV_TICWATCH_L = "TicWatch Left"
+DEV_TICWATCH_R = "TicWatch Right"
 
 METRIC_DEFS = {
     DEV_H10: {
-        "HR": None, "RR": None, 
+        "HR": None, "RR": None,
         "Accelerometer": ["Acc X", "Acc Y", "Acc Z"], "ECG": None
     },
     DEV_PVS: {
@@ -36,5 +38,15 @@ METRIC_DEFS = {
         "Gyroscope": ["Gyro X", "Gyro Y", "Gyro Z"],
         "Magnetometer": ["Mag X", "Mag Y", "Mag Z"],
         "Pitch": None, "Roll": None
-    }
+    },
+    DEV_TICWATCH_L: {
+        "Accelerometer": ["Acc X", "Acc Y", "Acc Z"],
+        "Gyroscope": ["Gyro X", "Gyro Y", "Gyro Z"],
+        "Magnetometer": ["Mag X", "Mag Y", "Mag Z"],
+    },
+    DEV_TICWATCH_R: {
+        "Accelerometer": ["Acc X", "Acc Y", "Acc Z"],
+        "Gyroscope": ["Gyro X", "Gyro Y", "Gyro Z"],
+        "Magnetometer": ["Mag X", "Mag Y", "Mag Z"],
+    },
 }

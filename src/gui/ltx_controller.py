@@ -23,7 +23,10 @@ class LTXApp:
         self.triggers: List[Dict] = []
         
         # Data Cache
-        self.data_state = {DEV_H10: {}, DEV_PVS: {}, DEV_GENKI: {}}
+        self.data_state = {
+            DEV_H10: {}, DEV_PVS: {}, DEV_GENKI: {},
+            DEV_TICWATCH_L: {}, DEV_TICWATCH_R: {},
+        }
         
         self._load_config()
         self._editing_idx: Optional[int] = None
@@ -61,6 +64,25 @@ class LTXApp:
         if s.acc: ds["Acc X"], ds["Acc Y"], ds["Acc Z"] = s.acc
         if s.gyro: ds["Gyro X"], ds["Gyro Y"], ds["Gyro Z"] = s.gyro
         if s.mag: ds["Mag X"], ds["Mag Y"], ds["Mag Z"] = s.mag
+        self._tick_engine()
+
+    def feed_ticwatch_data(self, side: str, samples):
+        """Feed TicWatch IMU samples into the LTX engine.
+
+        side: 'left' or 'right'
+        samples: list of TicWatchSample
+        """
+        if not samples:
+            return
+        dev = DEV_TICWATCH_L if side == "left" else DEV_TICWATCH_R
+        ds = self.data_state[dev]
+        for s in samples:
+            if s.sensor == "acc":
+                ds["Acc X"], ds["Acc Y"], ds["Acc Z"] = s.x, s.y, s.z
+            elif s.sensor == "gyro":
+                ds["Gyro X"], ds["Gyro Y"], ds["Gyro Z"] = s.x, s.y, s.z
+            elif s.sensor == "mag":
+                ds["Mag X"], ds["Mag Y"], ds["Mag Z"] = s.x, s.y, s.z
         self._tick_engine()
 
     def _tick_engine(self):
@@ -265,7 +287,10 @@ class LTXApp:
         with dpg.window(label="Trigger Editor", modal=True, tag=self.tag_modal, width=450, height=600):
             # 1. INPUT
             dpg.add_text("1. Signal Input", color=(0,255,255))
-            dpg.add_combo([DEV_H10, DEV_PVS, DEV_GENKI], label="Device", tag="m_dev", callback=self._m_dev_sel)
+            dpg.add_combo(
+                [DEV_H10, DEV_PVS, DEV_GENKI, DEV_TICWATCH_L, DEV_TICWATCH_R],
+                label="Device", tag="m_dev", callback=self._m_dev_sel,
+            )
             dpg.add_combo([], label="Metric", tag="m_met", callback=self._m_met_sel)
             with dpg.group(horizontal=True, tag="m_axes_grp", show=False):
                 dpg.add_text("Axes Sum: ")
