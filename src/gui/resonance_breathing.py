@@ -48,14 +48,23 @@ class ResonanceBreathingWidget:
             "Express Sweep (Fresh, ~8 mins)": {"type": "stepped", "base": 60, "wash": 30, "test": 60, "grid": [(6.5, 1.0), (6.0, 1.0), (5.5, 1.0), (5.0, 1.0), (4.5, 1.0)]},
             "Standard Sweep (Fresh, ~18 mins)": {"type": "stepped", "base": 120, "wash": 60, "test": 120, "grid": [(6.5, 1.0), (6.0, 1.0), (5.5, 1.0), (5.0, 1.0), (4.5, 1.0)]},
             "Deep Calibration Sweep (Fresh, ~42 mins)": {"type": "stepped", "base": 120, "wash": 60, "test": 180, "grid": [(6.5, 1.0), (6.5, 1.5), (6.0, 1.0), (6.0, 1.5), (6.0, 2.0), (5.5, 1.0), (5.5, 1.5), (5.5, 2.0), (5.0, 1.0), (5.0, 1.5), (5.0, 2.0), (4.5, 1.0), (4.5, 1.5)]},
-            self.TARGETED_KEY: {"type": "stepped"} 
+            self.TARGETED_KEY: {"type": "stepped"}
         }
         
         self.m_in, self.m_hi, self.m_ex, self.m_he = 4.0, 0.0, 6.0, 0.0
         self.baseline_metrics = {}
         self.leaderboard = []
         self._epoch_rr, self._epoch_ts = [], []
-        
+
+        # ACC breathing integration
+        # When True, coherence score uses the real-time ACC breath rate instead
+        # of the prescribed pacer rate.
+        self._use_acc_breathing: bool = False
+        self._acc_breath_rate_bpm: float = None  # updated by ui_manager
+
+        # Separate leaderboards: keyed by source ("prescribed" | "acc")
+        self._leaderboards: dict = {"prescribed": [], "acc": []}
+
         self.history = []
         self.historical_optimal = None
         self._load_history()
@@ -106,6 +115,20 @@ class ResonanceBreathingWidget:
                     with dpg.group(horizontal=True):
                         dpg.add_text("Protocol Selection:")
                         dpg.add_combo(list(self.presets.keys()), default_value=self.CONTINUOUS_KEY, width=350, tag="rb_preset_combo")
+                    # ACC breathing toggle
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_checkbox(
+                            label="Use ACC Breathing (real-time breath rate for coherence score)",
+                            tag="rb_use_acc_checkbox",
+                            default_value=False,
+                            callback=self._on_acc_toggle,
+                        )
+                    dpg.add_text(
+                        "ACC breath rate: --- br/min",
+                        tag="rb_acc_rate_text",
+                        color=(100, 255, 180),
+                    )
                     dpg.add_spacer(height=10)
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="START PROTOCOL", tag="rb_start_assess_btn", callback=self._start_assessment, width=200, height=40, enabled=False)
@@ -133,17 +156,33 @@ class ResonanceBreathingWidget:
                         dpg.add_button(label="Start Manual", tag="rb_manual_start_btn", callback=self._toggle_manual, width=120, enabled=False)
                         dpg.add_text("Coherence Score: ")
                         dpg.add_text("0.0", tag="rb_manual_coherence", color=(0, 255, 0))
-                
+
+                # --- Leaderboard tab: two sub-tabs for prescribed vs ACC ---
                 with dpg.tab(label="Assessment Leaderboard", tag="rb_leaderboard_tab"):
-                    dpg.add_spacer(height=10)
-                    with dpg.table(header_row=True, tag="rb_leaderboard_table", borders_innerH=True, borders_outerH=True):
-                        dpg.add_table_column(label="Rank")
-                        dpg.add_table_column(label="BPM")
-                        dpg.add_table_column(label="Protocol/Ratio")
-                        dpg.add_table_column(label="Score")
-                        dpg.add_table_column(label="Phase/PLV")
-                        dpg.add_table_column(label="PT Amp")
-                        dpg.add_table_column(label="LFnu")
+                    dpg.add_spacer(height=6)
+                    with dpg.tab_bar(tag="rb_lb_tabbar"):
+                        with dpg.tab(label="Prescribed Rate", tag="rb_lb_tab_prescribed"):
+                            dpg.add_spacer(height=6)
+                            with dpg.table(header_row=True, tag="rb_leaderboard_table",
+                                           borders_innerH=True, borders_outerH=True):
+                                dpg.add_table_column(label="Rank")
+                                dpg.add_table_column(label="BPM")
+                                dpg.add_table_column(label="Protocol/Ratio")
+                                dpg.add_table_column(label="Score")
+                                dpg.add_table_column(label="Phase/PLV")
+                                dpg.add_table_column(label="PT Amp")
+                                dpg.add_table_column(label="LFnu")
+                        with dpg.tab(label="ACC Breathing", tag="rb_lb_tab_acc"):
+                            dpg.add_spacer(height=6)
+                            with dpg.table(header_row=True, tag="rb_leaderboard_acc_table",
+                                           borders_innerH=True, borders_outerH=True):
+                                dpg.add_table_column(label="Rank")
+                                dpg.add_table_column(label="BPM")
+                                dpg.add_table_column(label="Protocol/Ratio")
+                                dpg.add_table_column(label="Score")
+                                dpg.add_table_column(label="Phase/PLV")
+                                dpg.add_table_column(label="PT Amp")
+                                dpg.add_table_column(label="LFnu")
 
             dpg.add_separator()
             dpg.add_spacer(height=10)
@@ -176,9 +215,10 @@ class ResonanceBreathingWidget:
             with dpg.drawlist(width=_PACER_W, height=_PACER_H, tag="rb_pacer_drawlist", show=False): pass 
 
         self._built = True
-        self.set_hr_status(self._hr_connected) 
+        self.set_hr_status(self._hr_connected)
         if self.history and self.history[-1].get("leaderboard"):
             self.leaderboard = self.history[-1]["leaderboard"]
+            self._leaderboards["prescribed"] = list(self.leaderboard)
             self._update_leaderboard_ui()
 
     # -------------------------------------------------------------------------
@@ -201,6 +241,15 @@ class ResonanceBreathingWidget:
             if self.state in [self.STATE_IDLE, self.STATE_COMPLETE]:
                 dpg.configure_item("rb_start_assess_btn", enabled=True)
                 dpg.configure_item("rb_manual_start_btn", enabled=True)
+
+    def set_acc_breath_rate(self, bpm: float):
+        """Called by ui_manager each time the ACC engine produces a new breath rate."""
+        self._acc_breath_rate_bpm = bpm
+        if self._built and dpg.does_item_exist("rb_acc_rate_text"):
+            dpg.set_value("rb_acc_rate_text", f"ACC breath rate: {bpm:.1f} br/min")
+
+    def _on_acc_toggle(self, sender, app_data):
+        self._use_acc_breathing = bool(app_data)
 
     def feed_rr(self, rr_ms: float):
         """Called by ui_manager for every heartbeat to fill our data arrays."""
@@ -361,12 +410,14 @@ class ResonanceBreathingWidget:
             self.total_assessment_duration = self.baseline_duration + (num * self.test_duration) + ((num - 1) * self.washout_duration)
         
         self.leaderboard.clear()
+        self._leaderboards["prescribed"].clear()
+        self._leaderboards["acc"].clear()
         self._clear_leaderboard_ui()
         dpg.configure_item("rb_start_assess_btn", show=False)
         dpg.configure_item("rb_stop_assess_btn", show=True)
         dpg.configure_item("rb_preset_combo", enabled=False)
         dpg.configure_item("rb_manual_start_btn", enabled=False)
-        
+
         self.state = self.STATE_BASELINE
         self.assessment_start_time = self.block_start_time = self._epoch_start_time = time.time()
         self._epoch_rr.clear()
@@ -399,19 +450,49 @@ class ResonanceBreathingWidget:
         self._epoch_ts.clear()
 
     def _process_testing_block(self, bpm, ratio):
-        cycle = 60.0 / bpm
-        breath_cycles = [(t, t + cycle) for t in np.arange(0, self.test_duration, cycle)]
-            
+        # When ACC breathing is active, use the real-time breath rate for phase
+        # synchrony calculation; the prescribed bpm/ratio still drives the pacer.
+        if self._use_acc_breathing and self._acc_breath_rate_bpm is not None:
+            effective_bpm = self._acc_breath_rate_bpm
+            # Assume 1:1 ratio for ACC-derived rate (no prescribed ratio)
+            effective_cycle = 60.0 / effective_bpm
+            i_sec = effective_cycle / 2.0
+            e_sec = effective_cycle / 2.0
+        else:
+            effective_bpm = bpm
+            effective_cycle = 60.0 / bpm
+            i_sec = effective_cycle / (1.0 + ratio)
+            e_sec = effective_cycle - i_sec
+
+        breath_cycles = [(t, t + effective_cycle)
+                         for t in np.arange(0, self.test_duration, effective_cycle)]
+
         rmssd = self.math.calculate_rmssd(self._epoch_rr)
         lf_abs, lf_nu = self.math.calculate_spectral_power(self._epoch_rr, self._epoch_ts)
         pt = self.math.calculate_pt_amplitude(self._epoch_rr, self._epoch_ts, breath_cycles)
-        phase = self.math.calculate_phase_synchrony(self._epoch_rr, self._epoch_ts, cycle/(1+ratio), cycle - (cycle/(1+ratio)))
-        
+        phase = self.math.calculate_phase_synchrony(
+            self._epoch_rr, self._epoch_ts, i_sec, e_sec
+        )
+
         score = self.math.score_epoch(rmssd, pt, lf_nu, phase, self.baseline_metrics)
-        self.leaderboard.append({'bpm': bpm, 'ratio': ratio, 'score': score, 'rmssd': rmssd, 'lf': lf_nu, 'pt': pt, 'phase': phase})
+        entry = {
+            'bpm': bpm,
+            'ratio': ratio,
+            'score': score,
+            'rmssd': rmssd,
+            'lf': lf_nu,
+            'pt': pt,
+            'phase': phase,
+            'source': 'acc' if self._use_acc_breathing else 'prescribed',
+        }
+        self.leaderboard.append(entry)
+        # Route to the appropriate sub-leaderboard
+        source_key = 'acc' if self._use_acc_breathing else 'prescribed'
+        self._leaderboards[source_key].append(entry)
         self._update_leaderboard_ui()
-        
-        if self.grid_index == len(self.assessment_grid) - 1: self._finish_stepped_assessment()
+
+        if self.grid_index == len(self.assessment_grid) - 1:
+            self._finish_stepped_assessment()
         else:
             self.state = self.STATE_WASHOUT
             self.block_start_time = time.time()
@@ -423,9 +504,17 @@ class ResonanceBreathingWidget:
             time_grid, resampled_rr, lf_power = csm.compute_continuous_lf_power(ts, rr)
             bpm_arr, _, ref_wave = self.continuous_pacer.evaluate(time_grid)
             pt_amp, plv = csm.calculate_rolling_metrics(resampled_rr, ref_wave)
-            best_bpm, best_score = csm.extract_resonance_frequency(time_grid, lf_power, pt_amp, plv, bpm_arr)
-            
-            self.leaderboard.append({'bpm': round(best_bpm, 1), 'ratio': "Cont", 'score': best_score, 'rmssd': 0.0, 'lf': 0.0, 'pt': 0.0, 'phase': 0.0})
+            best_bpm, best_score = csm.extract_resonance_frequency(
+                time_grid, lf_power, pt_amp, plv, bpm_arr
+            )
+            entry = {
+                'bpm': round(best_bpm, 1), 'ratio': "Cont",
+                'score': best_score, 'rmssd': 0.0, 'lf': 0.0, 'pt': 0.0, 'phase': 0.0,
+                'source': 'acc' if self._use_acc_breathing else 'prescribed',
+            }
+            self.leaderboard.append(entry)
+            source_key = 'acc' if self._use_acc_breathing else 'prescribed'
+            self._leaderboards[source_key].append(entry)
             self._update_leaderboard_ui()
         self._finalize_and_save()
 
@@ -438,13 +527,21 @@ class ResonanceBreathingWidget:
         dpg.configure_item("rb_stop_assess_btn", show=False)
         dpg.configure_item("rb_preset_combo", enabled=True)
         dpg.configure_item("rb_manual_start_btn", enabled=self._hr_connected)
-        
+
         if self.leaderboard:
             best = sorted(self.leaderboard, key=lambda x: x['score'], reverse=True)[0]
             self._save_history(best, sorted(self.leaderboard, key=lambda x: x['score'], reverse=True))
-            self._update_hud("ASSESSMENT COMPLETE", f"OPTIMAL FOUND: {best['bpm']} BPM", 1.0, (0, 255, 0))
+            source_label = " (ACC)" if best.get('source') == 'acc' else " (Prescribed)"
+            self._update_hud(
+                "ASSESSMENT COMPLETE",
+                f"OPTIMAL FOUND: {best['bpm']} BPM{source_label}",
+                1.0, (0, 255, 0),
+            )
             dpg.set_value("rb_total_time_text", "COMPLETE")
-            dpg.set_value("rb_history_display", f"Historical Optimal: {best['bpm']} BPM - Score: {best['score']:.1f}")
+            dpg.set_value(
+                "rb_history_display",
+                f"Historical Optimal: {best['bpm']} BPM{source_label} - Score: {best['score']:.1f}",
+            )
         else:
             self._update_hud("ASSESSMENT COMPLETE", "No data gathered.", 1.0, (150, 150, 150))
 
@@ -457,20 +554,37 @@ class ResonanceBreathingWidget:
         dpg.set_value("rb_progress_bar", progress)
 
     def _clear_leaderboard_ui(self):
-        if children := dpg.get_item_children("rb_leaderboard_table", 1):
-            for child in children: dpg.delete_item(child)
+        for tag in ("rb_leaderboard_table", "rb_leaderboard_acc_table"):
+            if dpg.does_item_exist(tag):
+                if children := dpg.get_item_children(tag, 1):
+                    for child in children:
+                        dpg.delete_item(child)
 
-    def _update_leaderboard_ui(self):
-        self._clear_leaderboard_ui()
-        for rank, data in enumerate(sorted(self.leaderboard, key=lambda x: x['score'], reverse=True), 1):
-            with dpg.table_row(parent="rb_leaderboard_table"):
+    def _populate_table(self, table_tag: str, entries: list):
+        """Fill a leaderboard table with sorted entries."""
+        if not dpg.does_item_exist(table_tag):
+            return
+        for rank, data in enumerate(
+            sorted(entries, key=lambda x: x['score'], reverse=True), 1
+        ):
+            with dpg.table_row(parent=table_tag):
                 dpg.add_text(f"#{rank}")
                 dpg.add_text(f"{data['bpm']:.1f}")
                 dpg.add_text(str(data['ratio']))
-                dpg.add_text(f"{data['score']:.1f}", color=(255, 215, 0) if rank == 1 else (255, 255, 255))
+                dpg.add_text(
+                    f"{data['score']:.1f}",
+                    color=(255, 215, 0) if rank == 1 else (255, 255, 255),
+                )
                 dpg.add_text(f"{data.get('phase', 0.0)*100:.1f}%")
                 dpg.add_text(f"{data.get('pt', 0.0):.1f}")
                 dpg.add_text(f"{data.get('lf', 0.0):.1f}%")
+
+    def _update_leaderboard_ui(self):
+        self._clear_leaderboard_ui()
+        # Prescribed leaderboard
+        self._populate_table("rb_leaderboard_table", self._leaderboards["prescribed"])
+        # ACC leaderboard
+        self._populate_table("rb_leaderboard_acc_table", self._leaderboards["acc"])
 
     def _update_manual_pacer(self, sender, app_data):
         self.m_in, self.m_hi, self.m_ex, self.m_he = (dpg.get_value(t) for t in ["rb_m_in", "rb_m_hi", "rb_m_ex", "rb_m_he"])

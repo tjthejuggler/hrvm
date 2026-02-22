@@ -14,6 +14,7 @@ from src.utils.ipc import (
     IPCMessage, BLECommand, ACCBatch, ECGBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
     MSG_HEARTBEAT_BLINK,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
+    MSG_CMD_SET_ACC_BREATH_RATE,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
     MSG_CMD_SET_SESSION_MODE, MSG_CMD_START_RECORDING, MSG_CMD_STOP_RECORDING,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
@@ -27,7 +28,10 @@ from src.gui.charts import (
     RMSSDHistoryChart, SDNNHistoryChart, CoherenceHistoryChart,
     HRVTachogramChart, HRVPoincareChart, HRVRMSSDChart, HRVSDNNChart, HRVCoherenceChart,
 )
-from src.gui.h10_imu_charts import ACCChart, ACCXChart, ACCYChart, ACCZChart, ECGChart
+from src.gui.h10_imu_charts import (
+    ACCChart, ACCXChart, ACCYChart, ACCZChart, ECGChart, BreathingPhaseChart,
+)
+from src.processing.acc_respiration import AccRespirationEngine, PROFILES
 from src.gui.counting_game import CountingGameWidget
 from src.gui.rapid_change_game import RapidChangeWidget
 from src.gui.resonance_breathing import ResonanceBreathingWidget
@@ -153,6 +157,10 @@ class UIManager:
         self.acc_y_chart = ACCYChart()
         self.acc_z_chart = ACCZChart()
         self.ecg_chart = ECGChart()
+        self.breath_phase_chart = BreathingPhaseChart()
+
+        # ACC-based respiration engine
+        self.acc_resp_engine = AccRespirationEngine()
 
         # HRV section charts (device-agnostic, H10 preferred / PVS fallback)
         self.hrv_tachogram_chart = HRVTachogramChart()
@@ -379,6 +387,7 @@ class UIManager:
                         with dpg.group(tag="polar_h10_graphs_container"):
                             self.biofeedback_chart.build("polar_h10_graphs_container")
                             self.heartbeat_chart.build("polar_h10_graphs_container")
+                            self.breath_phase_chart.build("polar_h10_graphs_container")
                             self.acc_chart.build("polar_h10_graphs_container")
                             self.acc_x_chart.build("polar_h10_graphs_container")
                             self.acc_y_chart.build("polar_h10_graphs_container")
@@ -486,6 +495,24 @@ class UIManager:
             dpg.add_checkbox(label="Audio Feedback", callback=self.toggle_audio,
                              default_value=False)
 
+            # --- Breathing profile + calibration ---
+            dpg.add_spacer(width=20)
+            dpg.add_text("Breath Profile:", color=(150, 220, 255))
+            dpg.add_combo(
+                items=PROFILES,
+                tag="breath_profile_combo",
+                default_value=PROFILES[0],
+                width=100,
+                callback=self._on_breath_profile_changed,
+            )
+            dpg.add_button(
+                label="Calibrate Breath",
+                tag="breath_cal_btn",
+                callback=self._open_breath_cal_popup,
+                width=130,
+            )
+            dpg.add_text("", tag="breath_rate_text", color=(100, 255, 180))
+
     def _build_metrics_bar(self):
         """Horizontal bar of large session metric numbers."""
         with dpg.group(horizontal=True):
@@ -559,6 +586,134 @@ class UIManager:
                            callback=lambda: dpg.delete_item("settings_popup"),
                            width=-1)
 
+    # --- Breathing Calibration ---
+
+    def _on_breath_profile_changed(self, sender, app_data):
+        self.acc_resp_engine.profile = app_data
+
+    def _open_breath_cal_popup(self):
+        """Open the breathing calibration popup for the currently selected profile."""
+        if dpg.does_item_exist("breath_cal_popup"):
+            dpg.delete_item("breath_cal_popup")
+
+        profile = self.acc_resp_engine.profile
+        self.acc_resp_engine.start_calibration()
+
+        with dpg.window(
+            label=f"Calibrate Breathing — {profile.capitalize()}",
+            modal=True, tag="breath_cal_popup",
+            width=480, height=320, no_resize=True,
+        ):
+            dpg.add_text(
+                f"Profile: {profile.capitalize()}",
+                color=(100, 220, 255),
+            )
+            dpg.add_separator()
+            dpg.add_text(
+                "Hold the matching key while performing each breathing action:",
+                color=(200, 200, 200),
+            )
+            dpg.add_spacer(height=6)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="[Z] INHALE",
+                    tag="cal_btn_inhale",
+                    width=130, height=50,
+                    callback=lambda: self.acc_resp_engine.set_cal_state("INHALING"),
+                )
+                dpg.add_button(
+                    label="[X] EXHALE",
+                    tag="cal_btn_exhale",
+                    width=130, height=50,
+                    callback=lambda: self.acc_resp_engine.set_cal_state("EXHALING"),
+                )
+                dpg.add_button(
+                    label="[C] HOLD",
+                    tag="cal_btn_hold",
+                    width=130, height=50,
+                    callback=lambda: self.acc_resp_engine.set_cal_state("HOLDING"),
+                )
+            dpg.add_spacer(height=8)
+            dpg.add_text("Current action: ---", tag="cal_action_text",
+                         color=(255, 220, 50))
+            dpg.add_text("Thresholds: In > 2.0 | Ex < -2.0",
+                         tag="cal_thresh_text", color=(150, 200, 150))
+            dpg.add_text("System sees: ---", tag="cal_system_text",
+                         color=(180, 180, 180))
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="✔ Finish & Save",
+                    callback=self._finish_breath_cal,
+                    width=160, height=36,
+                )
+                dpg.add_button(
+                    label="✖ Cancel",
+                    callback=self._cancel_breath_cal,
+                    width=100, height=36,
+                )
+
+        # Register a keyboard handler for z/x/c while popup is open
+        if dpg.does_item_exist("breath_cal_key_handler"):
+            dpg.delete_item("breath_cal_key_handler")
+        with dpg.handler_registry(tag="breath_cal_key_handler"):
+            dpg.add_key_press_handler(
+                dpg.mvKey_Z,
+                callback=lambda: self.acc_resp_engine.set_cal_state("INHALING"),
+            )
+            dpg.add_key_press_handler(
+                dpg.mvKey_X,
+                callback=lambda: self.acc_resp_engine.set_cal_state("EXHALING"),
+            )
+            dpg.add_key_press_handler(
+                dpg.mvKey_C,
+                callback=lambda: self.acc_resp_engine.set_cal_state("HOLDING"),
+            )
+
+    def _finish_breath_cal(self):
+        self.acc_resp_engine.finish_calibration()
+        self._cleanup_breath_cal_popup()
+
+    def _cancel_breath_cal(self):
+        self.acc_resp_engine.cancel_calibration()
+        self._cleanup_breath_cal_popup()
+
+    def _cleanup_breath_cal_popup(self):
+        if dpg.does_item_exist("breath_cal_key_handler"):
+            dpg.delete_item("breath_cal_key_handler")
+        if dpg.does_item_exist("breath_cal_popup"):
+            dpg.delete_item("breath_cal_popup")
+
+    def _tick_breath_cal_popup(self):
+        """Called each frame to refresh calibration feedback in the popup."""
+        if not dpg.does_item_exist("breath_cal_popup"):
+            return
+        if not self.acc_resp_engine.is_calibrating:
+            return
+
+        state = self.acc_resp_engine.cal_state or "---"
+        if dpg.does_item_exist("cal_action_text"):
+            dpg.set_value("cal_action_text", f"Current action: {state}")
+
+        ti = self.acc_resp_engine.thresh_in
+        te = self.acc_resp_engine.thresh_ex
+        if dpg.does_item_exist("cal_thresh_text"):
+            dpg.set_value("cal_thresh_text",
+                          f"Thresholds: In > {ti:.1f} | Ex < {te:.1f}")
+
+        delta = self.acc_resp_engine.get_delta()
+        if delta is not None and dpg.does_item_exist("cal_system_text"):
+            from src.processing.acc_respiration import BUFFER_SIZE
+            # Show what the system currently predicts
+            predicted = self.acc_resp_engine._get_predicted_phase(
+                delta, self.acc_resp_engine.current_phase
+            )
+            match = "✅" if (state == predicted) else "⚠️"
+            dpg.set_value(
+                "cal_system_text",
+                f"System sees: {predicted}  {match}  (delta={delta:.1f})",
+            )
+
     # --- Main Loop ---
 
     def run(self):
@@ -585,6 +740,7 @@ class UIManager:
             self._poll_genki_wave()
             self._poll_pvs()
             self._poll_ticwatch()
+            self._tick_breath_cal_popup()
 
             # App ticks
             self.counting_game.tick()
@@ -844,6 +1000,29 @@ class UIManager:
         self.acc_x_chart.update_plot(current_time)
         self.acc_y_chart.update_plot(current_time)
         self.acc_z_chart.update_plot(current_time)
+
+        # Feed Z-axis samples into the respiration engine
+        z_samples = [z for (_, _, z) in batch.samples]
+        self.acc_resp_engine.feed_samples(z_samples)
+
+        # Update breathing phase chart (use predicted_phase — raw, no debounce lag)
+        self.breath_phase_chart.update_phase(self.acc_resp_engine.predicted_phase, current_time)
+        self.breath_phase_chart.update_plot(current_time)
+
+        # Update breath rate display in top bar and forward to signal processor
+        bpm = self.acc_resp_engine.current_breath_rate_bpm
+        if bpm is not None:
+            if dpg.does_item_exist("breath_rate_text"):
+                dpg.set_value("breath_rate_text", f"{bpm:.1f} br/min")
+            # Forward to signal processor so coherence uses real breath rate
+            try:
+                self.math_control_pipe.send(
+                    IPCMessage(MSG_CMD_SET_ACC_BREATH_RATE, {"bpm": bpm})
+                )
+            except Exception:
+                pass
+            # Also forward to resonance breathing widget
+            self.resonance_breathing.set_acc_breath_rate(bpm)
 
         # Batch samples are typically (N, 3). Take the last one.
         if len(batch.samples) > 0:

@@ -12,6 +12,7 @@ from src.utils.ipc import (
     IPCMessage, ECGBatch, HRBatch, ACCBatch, MSG_TERMINATE, MSG_DATA_UPDATE,
     MSG_HEARTBEAT_BLINK,
     MSG_CMD_START_STREAM, MSG_CMD_STOP_STREAM, MSG_CMD_SET_PACER_TARGET,
+    MSG_CMD_SET_ACC_BREATH_RATE,
     MSG_CMD_START_ASSESSMENT, MSG_CMD_STOP_ASSESSMENT, MSG_ASSESSMENT_RESULT,
     MSG_CMD_SET_SESSION_MODE, MSG_CMD_START_RECORDING, MSG_CMD_STOP_RECORDING,
     KEY_TIMESTAMP, KEY_RAW_ECG, KEY_RMSSD, KEY_INTERPOLATED_HR, KEY_COHERENCE,
@@ -71,7 +72,8 @@ class SignalProcessor:
         self.zi = lfilter_zi(self.b, self.a)
         
         # State
-        self.pacer_target_bpm = 6.0 # Default
+        self.pacer_target_bpm = 6.0  # Default (used when ACC breath rate unavailable)
+        self.acc_breath_rate_bpm: Optional[float] = None  # Set by ACC respiration engine
         self.last_coherence_calc_time = 0.0
         self._last_coherence_score = 0.0  # carry-forward to avoid saw-teeth
         self.assessment_active = False
@@ -202,10 +204,16 @@ class SignalProcessor:
         display_hr = float(hr_bpm) if hr_bpm > 0 else (y_new[-1] if len(y_new) > 0 else 0.0)
 
         # Coherence calculation — carry forward last known value to avoid saw-teeth
+        # Use ACC-detected breath rate when available, otherwise fall back to pacer target
         coherence_score = self._last_coherence_score
         if current_time - self.last_coherence_calc_time > 1.0:
             if len(y_new) > 0:
-                target_freq = self.pacer_target_bpm / 60.0
+                effective_bpm = (
+                    self.acc_breath_rate_bpm
+                    if self.acc_breath_rate_bpm is not None
+                    else self.pacer_target_bpm
+                )
+                target_freq = effective_bpm / 60.0
                 new_score = calculate_coherence_score(y_new, target_freq=target_freq)
                 if new_score > 0.0:
                     self._last_coherence_score = new_score
@@ -309,6 +317,11 @@ class SignalProcessor:
         elif message.type == MSG_CMD_SET_PACER_TARGET:
             self.pacer_target_bpm = message.payload.get(KEY_PACER_BPM, 6.0)
             logger.info(f"Pacer target set to {self.pacer_target_bpm} BPM")
+
+        elif message.type == MSG_CMD_SET_ACC_BREATH_RATE:
+            bpm = message.payload.get("bpm")
+            self.acc_breath_rate_bpm = float(bpm) if bpm is not None else None
+            logger.debug(f"ACC breath rate updated: {self.acc_breath_rate_bpm}")
             
         elif message.type == MSG_CMD_START_ASSESSMENT:
             self.start_assessment(message.payload.get(KEY_ASSESSMENT_TAG))
