@@ -1,0 +1,15 @@
+{
+  "headers": {
+    "header_apps": true,
+    "header_graphs": true,
+    "header_hrv": true,
+    "header_polar_h10": true,
+    "header_genki_wave": true,
+    "header_pvs": true,
+    "header_ticwatch_left": true,
+    "header_ticwatch_right": true
+  },
+  "led_ball_ip": "10.42.0.75",
+  "led_ball_enabled": false,
+  "breath_source": "h10"
+}

@@ -1,4 +1,5 @@
 import os
+import json
 import dearpygui.dearpygui as dpg
 import numpy as np
 import time
@@ -61,6 +62,19 @@ logger = logging.getLogger(__name__)
 
 _RECORDING_TYPES_FILE = "recording_types.json"
 _DEFAULT_RECORDING_TYPES = ["chess", "meditation", "movie"]
+_UI_STATE_FILE = "ui_state.json"
+
+# Tags for all collapsing headers whose open/closed state should be persisted
+_HEADER_TAGS = [
+    "header_apps",
+    "header_graphs",
+    "header_hrv",
+    "header_polar_h10",
+    "header_genki_wave",
+    "header_pvs",
+    "header_ticwatch_left",
+    "header_ticwatch_right",
+]
 
 
 class UIManager:
@@ -73,13 +87,17 @@ class UIManager:
         self.auto_connect = auto_connect
         self.running = False
 
+        # Load persisted UI state early so settings can be applied below
+        self._ui_state = self._load_ui_state()
+
         # Audio Feedback
         self.audio_feedback = AudioFeedback()
         self.audio_enabled = False
 
-        # LED Ball Control
-        self.led_ball = LEDBallController()
-        self.led_ball_enabled = False
+        # LED Ball Control — restore IP and enabled state from persisted state
+        _saved_ip = self._ui_state.get("led_ball_ip", "10.122.252.133")
+        self.led_ball = LEDBallController(ip=_saved_ip)
+        self.led_ball_enabled = self._ui_state.get("led_ball_enabled", False)
 
         # Shared memory for ECG display (legacy, kept for compatibility)
         self.shm: Optional[shared_memory.SharedMemory] = None
@@ -166,8 +184,8 @@ class UIManager:
         # Genki Wave respiration engine (separate cal file, 3-axis)
         self.genki_resp_engine = GenkiRespirationEngine()
 
-        # Breath source: "h10" | "genki"
-        self._breath_source: str = "h10"
+        # Breath source: "h10" | "genki" — restore from persisted state
+        self._breath_source: str = self._ui_state.get("breath_source", "h10")
 
         # HRV section charts (device-agnostic, H10 preferred / PVS fallback)
         self.hrv_tachogram_chart = HRVTachogramChart()
@@ -278,6 +296,44 @@ class UIManager:
         self._update_hrv_source()
 
     # ------------------------------------------------------------------
+    # UI State Persistence
+    # ------------------------------------------------------------------
+
+    def _load_ui_state(self) -> dict:
+        """Load persisted UI state from file. Returns empty dict on failure."""
+        try:
+            if os.path.exists(_UI_STATE_FILE):
+                with open(_UI_STATE_FILE, "r") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load UI state: {e}")
+        return {}
+
+    def _save_ui_state(self):
+        """Persist current UI state (header open/closed + settings) to file."""
+        state = {}
+
+        # Collapsing header open/closed state
+        headers = {}
+        for tag in _HEADER_TAGS:
+            if dpg.does_item_exist(tag):
+                headers[tag] = dpg.get_value(tag)
+        state["headers"] = headers
+
+        # LED ball settings
+        state["led_ball_ip"] = self.led_ball.ip
+        state["led_ball_enabled"] = self.led_ball_enabled
+
+        # Breath source
+        state["breath_source"] = self._breath_source
+
+        try:
+            with open(_UI_STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save UI state: {e}")
+
+    # ------------------------------------------------------------------
     # UI Setup
     # ------------------------------------------------------------------
 
@@ -285,6 +341,11 @@ class UIManager:
         dpg.create_context()
         dpg.create_viewport(title="Polar H10 HRVB", width=1280, height=900)
         dpg.setup_dearpygui()
+
+        # Shorthand for reading persisted header open/closed state
+        _h = self._ui_state.get("headers", {})
+        def _hopen(tag: str, default: bool = True) -> bool:
+            return _h.get(tag, default)
 
         # Load a larger font for metric value displays
         with dpg.font_registry():
@@ -336,7 +397,8 @@ class UIManager:
                         dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255, 255))
                         dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 10)
 
-                with dpg.collapsing_header(label="APPS", tag="header_apps", default_open=True):
+                with dpg.collapsing_header(label="APPS", tag="header_apps",
+                                           default_open=_hopen("header_apps", True)):
                     dpg.bind_item_theme(dpg.last_item(), "apps_header_theme")
 
                     with dpg.group(tag="apps_container"):
@@ -374,12 +436,13 @@ class UIManager:
                         dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 8, 8)
 
                 with dpg.collapsing_header(label="GRAPHS", tag="header_graphs",
-                                           default_open=True):
+                                           default_open=_hopen("header_graphs", True)):
                     dpg.bind_item_theme(dpg.last_item(), "graphs_header_theme")
 
                     # --- HRV Section (device-agnostic, H10 preferred / PVS fallback) ---
                     with dpg.collapsing_header(label="HRV", tag="header_hrv",
-                                               default_open=True, show=False):
+                                               default_open=_hopen("header_hrv", True),
+                                               show=False):
                         dpg.bind_item_theme(dpg.last_item(), "hrv_subsection_theme")
 
                         with dpg.group(tag="hrv_graphs_container"):
@@ -391,7 +454,8 @@ class UIManager:
 
                     # --- Polar H10 Device Subsection ---
                     with dpg.collapsing_header(label="Polar H10", tag="header_polar_h10",
-                                               default_open=True, show=False):
+                                               default_open=_hopen("header_polar_h10", True),
+                                               show=False):
                         dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
 
                         with dpg.group(tag="polar_h10_graphs_container"):
@@ -411,7 +475,8 @@ class UIManager:
 
                     # --- Genki Wave Device Subsection ---
                     with dpg.collapsing_header(label="Genki Wave", tag="header_genki_wave",
-                                               default_open=True, show=False):
+                                               default_open=_hopen("header_genki_wave", True),
+                                               show=False):
                         dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
 
                         with dpg.group(tag="genki_wave_graphs_container"):
@@ -421,7 +486,8 @@ class UIManager:
 
                     # --- Polar Verity Sense Device Subsection ---
                     with dpg.collapsing_header(label="Polar Verity Sense", tag="header_pvs",
-                                               default_open=True, show=False):
+                                               default_open=_hopen("header_pvs", True),
+                                               show=False):
                         dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
 
                         with dpg.group(tag="pvs_graphs_container"):
@@ -434,7 +500,8 @@ class UIManager:
                     # --- TicWatch Left Device Subsection ---
                     with dpg.collapsing_header(label="TicWatch Left",
                                                tag="header_ticwatch_left",
-                                               default_open=True, show=False):
+                                               default_open=_hopen("header_ticwatch_left", True),
+                                               show=False):
                         dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
 
                         with dpg.group(tag="ticwatch_left_graphs_container"):
@@ -445,7 +512,8 @@ class UIManager:
                     # --- TicWatch Right Device Subsection ---
                     with dpg.collapsing_header(label="TicWatch Right",
                                                tag="header_ticwatch_right",
-                                               default_open=True, show=False):
+                                               default_open=_hopen("header_ticwatch_right", True),
+                                               show=False):
                         dpg.bind_item_theme(dpg.last_item(), "device_subsection_theme")
 
                         with dpg.group(tag="ticwatch_right_graphs_container"):
@@ -579,11 +647,10 @@ class UIManager:
             dpg.add_text("LED Ball", color=(0, 255, 255))
             dpg.add_separator()
             dpg.add_checkbox(label="Enable LED Ball", tag="led_ball_checkbox",
-                             default_value=False, callback=self._toggle_led_ball)
+                             default_value=self.led_ball_enabled,
+                             callback=self._toggle_led_ball)
             dpg.add_input_text(label="IP", tag="led_ball_ip_input",
-                               default_value=self.led_ball.ip, width=180,
-                               callback=self._update_led_ball_ip,
-                               on_enter=True)
+                               default_value=self.led_ball.ip, width=180)
 
             dpg.add_spacer(height=14)
             dpg.add_text("Breath Source", color=(0, 255, 255))
@@ -607,8 +674,18 @@ class UIManager:
 
             dpg.add_spacer(height=14)
             dpg.add_button(label="Close",
-                           callback=lambda: dpg.delete_item("settings_popup"),
+                           callback=self._close_settings_popup,
                            width=-1)
+
+    def _close_settings_popup(self):
+        """Read all settings values from the popup before closing it."""
+        if dpg.does_item_exist("led_ball_ip_input"):
+            ip = dpg.get_value("led_ball_ip_input").strip()
+            if ip and ip != self.led_ball.ip:
+                self.led_ball.set_ip(ip)
+                logger.info(f"LED ball IP set to {ip}")
+        if dpg.does_item_exist("settings_popup"):
+            dpg.delete_item("settings_popup")
 
     def _on_breath_source_changed(self, sender, app_data):
         self._breath_source = "h10" if "H10" in app_data else "genki"
@@ -943,6 +1020,7 @@ class UIManager:
             dpg.render_dearpygui_frame()
 
         # Cleanup
+        self._save_ui_state()
         if self.audio_enabled:
             self.audio_feedback.stop()
         self.genki_manager.shutdown()
