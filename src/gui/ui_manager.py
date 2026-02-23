@@ -184,6 +184,7 @@ class UIManager:
 
         # Resonance Breathing app
         self.resonance_breathing = ResonanceBreathingWidget(db=self.db)
+        self.resonance_breathing.set_led_ball(self.led_ball)
 
         # LTX controller app
         self.ltx_app = LTXApp()

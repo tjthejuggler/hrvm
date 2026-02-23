@@ -5,6 +5,7 @@ import time
 import logging
 import json
 import os
+import threading
 import numpy as np
 import dearpygui.dearpygui as dpg
 
@@ -12,6 +13,30 @@ import dearpygui.dearpygui as dpg
 from src.processing.resonance_math import PhysiologicalMath, ContinuousPacer, ContinuousSlidingMath
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Coherence score → base RGB color mapping
+# Scores are 0–100 (roughly). We want white/yellow/pink to be very rare
+# (only achievable at elite levels), so the thresholds are intentionally
+# demanding at the top end.
+# ---------------------------------------------------------------------------
+_COHERENCE_COLORS = [
+    # (min_score, (R, G, B))
+    (90, (255, 255, 255)),   # White  — extraordinary (>90)
+    (80, (255, 255,   0)),   # Yellow — exceptional  (80–90)
+    (70, (255, 105, 180)),   # Pink   — excellent    (70–80)
+    (55, (  0,   0, 255)),   # Blue   — very good    (55–70)
+    (40, (  0, 200,   0)),   # Green  — good         (40–55)
+    (25, (255, 140,   0)),   # Orange — fair         (25–40)
+    ( 0, (255,   0,   0)),   # Red    — low          ( 0–25)
+]
+
+def _coherence_to_base_color(score: float):
+    """Return (R, G, B) base color for the given coherence score."""
+    for threshold, color in _COHERENCE_COLORS:
+        if score >= threshold:
+            return color
+    return (255, 0, 0)
 
 _PACER_W = 1200
 _PACER_H = 60
@@ -30,6 +55,14 @@ class ResonanceBreathingWidget:
         self.db = db
         self._built = False
         self._hr_connected = False
+
+        # LTX LED ball integration
+        self._led_ball = None          # set via set_led_ball()
+        self._use_ltx_ball = False     # toggled by checkbox
+        self._ltx_flash_timer = None   # threading.Timer for flash-back
+        self._ltx_prev_vol = 0.0       # previous breath bar volume (0–1)
+        self._ltx_prev_phase = ""      # previous phase text
+        self._latest_coherence = 0.0   # kept in sync by update_resonance_score()
         
         self.math = PhysiologicalMath()
         self.continuous_pacer = None
@@ -156,6 +189,13 @@ class ResonanceBreathingWidget:
                         dpg.add_button(label="Start Manual", tag="rb_manual_start_btn", callback=self._toggle_manual, width=120, enabled=False)
                         dpg.add_text("Coherence Score: ")
                         dpg.add_text("0.0", tag="rb_manual_coherence", color=(0, 255, 0))
+                    dpg.add_spacer(height=8)
+                    dpg.add_checkbox(
+                        label="Use LTX Ball (breath bar → brightness, coherence → color)",
+                        tag="rb_use_ltx_checkbox",
+                        default_value=False,
+                        callback=self._on_ltx_toggle,
+                    )
 
                 # --- Leaderboard tab: two sub-tabs for prescribed vs ACC ---
                 with dpg.tab(label="Assessment Leaderboard", tag="rb_leaderboard_tab"):
@@ -259,11 +299,98 @@ class ResonanceBreathingWidget:
             self._epoch_rr.append(rr_ms)
             self._epoch_ts.append(ts)
 
+    def set_led_ball(self, led_ball) -> None:
+        """Inject the shared LEDBallController instance from UIManager."""
+        self._led_ball = led_ball
+
+    def _on_ltx_toggle(self, sender, app_data):
+        self._use_ltx_ball = bool(app_data)
+        if not self._use_ltx_ball and self._led_ball is not None:
+            # Turn ball off when feature is disabled
+            self._cancel_flash_timer()
+            self._led_ball.send_color(0, 0, 0)
+
     def update_resonance_score(self, score: float) -> None:
         """MISSING METHOD RESTORED: Satisfies ui_manager.py payload update"""
         self._latest_coherence = score
         if self._built and dpg.does_item_exist("rb_manual_coherence"):
             dpg.set_value("rb_manual_coherence", f"{score:.1f}")
+
+    # -------------------------------------------------------------------------
+    # LTX LED Ball helpers
+    # -------------------------------------------------------------------------
+    def _cancel_flash_timer(self):
+        if self._ltx_flash_timer is not None:
+            self._ltx_flash_timer.cancel()
+            self._ltx_flash_timer = None
+
+    def _send_ball_color(self, r: int, g: int, b: int):
+        """Send color to ball, clamping values to 0–255."""
+        if self._led_ball is None:
+            return
+        self._led_ball.send_color(
+            max(0, min(255, r)),
+            max(0, min(255, g)),
+            max(0, min(255, b)),
+        )
+
+    def _update_ltx_ball(self, vol: float, phase_txt: str):
+        """Drive the LTX ball from the current breath bar state.
+
+        vol       — breath bar fill fraction 0.0 (empty) → 1.0 (full)
+        phase_txt — "INHALE", "EXHALE", "HOLD FULL", "HOLD EMPTY"
+        """
+        if not self._use_ltx_ball or self._led_ball is None:
+            return
+
+        br, bg, bb = _coherence_to_base_color(self._latest_coherence)
+
+        # Detect phase transitions for flash effects
+        prev_vol = self._ltx_prev_vol
+        prev_phase = self._ltx_prev_phase
+
+        # Peak-inhale flash: bar just reached full (vol ≥ 0.98) and was rising
+        at_peak = vol >= 0.98 and prev_vol < 0.98 and phase_txt in ("INHALE", "HOLD FULL")
+        # Trough-exhale flash: bar just reached empty (vol ≤ 0.02) and was falling
+        at_trough = vol <= 0.02 and prev_vol > 0.02 and phase_txt in ("EXHALE", "HOLD EMPTY")
+
+        self._ltx_prev_vol = vol
+        self._ltx_prev_phase = phase_txt
+
+        if at_peak:
+            # Flash to black for 100 ms, then restore brightness
+            self._cancel_flash_timer()
+            self._send_ball_color(0, 0, 0)
+            def _restore_peak():
+                # After flash, ball should be at full brightness
+                self._send_ball_color(br, bg, bb)
+            self._ltx_flash_timer = threading.Timer(0.1, _restore_peak)
+            self._ltx_flash_timer.daemon = True
+            self._ltx_flash_timer.start()
+            return
+
+        if at_trough:
+            # Flash to full brightness for 100 ms, then restore dim
+            self._cancel_flash_timer()
+            self._send_ball_color(br, bg, bb)
+            def _restore_trough():
+                # After flash, ball should be at minimum brightness (dim)
+                dim_r = max(10, int(br * 0.05))
+                dim_g = max(10, int(bg * 0.05))
+                dim_b = max(10, int(bb * 0.05))
+                self._send_ball_color(dim_r, dim_g, dim_b)
+            self._ltx_flash_timer = threading.Timer(0.1, _restore_trough)
+            self._ltx_flash_timer.daemon = True
+            self._ltx_flash_timer.start()
+            return
+
+        # Normal brightness: scale base color by vol (min 5% so ball never fully off)
+        brightness = 0.05 + 0.95 * vol
+        self._send_ball_color(
+            int(br * brightness),
+            int(bg * brightness),
+            int(bb * brightness),
+        )
 
     # -------------------------------------------------------------------------
     # UI DRAWING
@@ -275,9 +402,9 @@ class ResonanceBreathingWidget:
         if phase_text == "MANUAL":
             t_cycle = phase_rad
             i, hi, e = self.m_in, self.m_hi, self.m_ex
-            if t_cycle < i: txt, vol, col = "INHALE", t_cycle / i, (0, 200, 255, 255) 
-            elif t_cycle < i + hi: txt, vol, col = "HOLD FULL", 1.0, (0, 150, 200, 255) 
-            elif t_cycle < i + hi + e: txt, vol, col = "EXHALE", 1.0 - ((t_cycle - i - hi) / e), (0, 200, 255, 255) 
+            if t_cycle < i: txt, vol, col = "INHALE", t_cycle / i, (0, 200, 255, 255)
+            elif t_cycle < i + hi: txt, vol, col = "HOLD FULL", 1.0, (0, 150, 200, 255)
+            elif t_cycle < i + hi + e: txt, vol, col = "EXHALE", 1.0 - ((t_cycle - i - hi) / e), (0, 200, 255, 255)
             else: txt, vol, col = "HOLD EMPTY", 0.0, (80, 80, 80, 255)
         else:
             if mod_phase < np.pi: txt, vol, col = "INHALE", mod_phase / np.pi, (0, 200, 255, 255)
@@ -286,6 +413,9 @@ class ResonanceBreathingWidget:
         dpg.draw_rectangle((0, 0), (_PACER_W, _PACER_H), color=(50, 50, 50), fill=(30, 30, 30), parent="rb_pacer_drawlist")
         dpg.draw_rectangle((0, 0), (_PACER_W * vol, _PACER_H), color=(0,0,0,0), fill=col, parent="rb_pacer_drawlist")
         dpg.draw_text((_PACER_W / 2 - 30, _PACER_H / 2 - 10), txt, size=20, color=(255, 255, 255), parent="rb_pacer_drawlist")
+
+        # Drive LTX ball from breath bar state
+        self._update_ltx_ball(vol, txt)
 
     # -------------------------------------------------------------------------
     # STATE MACHINE TICK
