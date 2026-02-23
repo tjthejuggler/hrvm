@@ -6,6 +6,7 @@ import logging
 import json
 import os
 import threading
+from datetime import datetime
 import numpy as np
 import dearpygui.dearpygui as dpg
 
@@ -111,6 +112,16 @@ class ResonanceBreathingWidget:
 
         self.history = []
         self.historical_optimal = None
+
+        # Flat list of all individual session entries for the history tab.
+        # Each entry: {session_ts, session_dt, bpm, ratio, score, phase, pt, lf, source}
+        self._all_session_entries: list = []
+
+        # History-tab filter/sort state
+        self._hist_sort_col: str = "session_ts"   # column key to sort by
+        self._hist_sort_asc: bool = False          # descending by default (newest first)
+        self._hist_filter_source: str = "All"     # "All" | "Prescribed" | "ACC"
+
         self._load_history()
 
     def _load_history(self):
@@ -125,14 +136,39 @@ class ResonanceBreathingWidget:
                             self._latest_lb_score = float(
                                 self.historical_optimal.get("score", 0.0)
                             )
-            except Exception as e: logger.error(f"Failed to load RF history: {e}")
+                        self._rebuild_all_session_entries()
+            except Exception as e:
+                logger.error(f"Failed to load RF history: {e}")
+
+    def _rebuild_all_session_entries(self):
+        """Flatten all history runs into self._all_session_entries for the history tab."""
+        self._all_session_entries = []
+        for run in self.history:
+            session_ts = run.get("timestamp", 0.0)
+            session_dt = datetime.fromtimestamp(session_ts).strftime("%Y-%m-%d %H:%M")
+            for entry in run.get("leaderboard", []):
+                flat = {
+                    "session_ts": session_ts,
+                    "session_dt": session_dt,
+                    "bpm": entry.get("bpm", 0.0),
+                    "ratio": entry.get("ratio", 1.0),
+                    "score": entry.get("score", 0.0),
+                    "phase": entry.get("phase", 0.0),
+                    "pt": entry.get("pt", 0.0),
+                    "lf": entry.get("lf", 0.0),
+                    "source": entry.get("source", "prescribed"),
+                }
+                self._all_session_entries.append(flat)
 
     def _save_history(self, best_node, leaderboard):
         self.history.append({"timestamp": time.time(), "best": best_node, "leaderboard": leaderboard})
         try:
-            with open(_HISTORY_FILE, "w") as f: json.dump(self.history, f, indent=4)
+            with open(_HISTORY_FILE, "w") as f:
+                json.dump(self.history, f, indent=4)
             self.historical_optimal = best_node
-        except Exception as e: logger.error(f"Failed to save RF history: {e}")
+            self._rebuild_all_session_entries()
+        except Exception as e:
+            logger.error(f"Failed to save RF history: {e}")
 
     def build(self, parent: str) -> None:
         if self._built: return
@@ -255,6 +291,10 @@ class ResonanceBreathingWidget:
                                 dpg.add_table_column(label="PT Amp")
                                 dpg.add_table_column(label="LFnu")
 
+                # --- Session History tab ---
+                with dpg.tab(label="Session History", tag="rb_history_tab"):
+                    self._build_history_tab()
+
             dpg.add_separator()
             dpg.add_spacer(height=10)
             with dpg.group(horizontal=True, tag="rb_timing_group", show=False):
@@ -291,6 +331,8 @@ class ResonanceBreathingWidget:
             self.leaderboard = self.history[-1]["leaderboard"]
             self._leaderboards["prescribed"] = list(self.leaderboard)
             self._update_leaderboard_ui()
+        # Populate history tab from loaded data
+        self._refresh_history_ui()
 
     # -------------------------------------------------------------------------
     # HARDWARE & DATA INGESTION
@@ -723,6 +765,160 @@ class ResonanceBreathingWidget:
         dpg.set_value("rb_instruction_text", instruction)
         dpg.set_value("rb_progress_bar", progress)
 
+    # -------------------------------------------------------------------------
+    # SESSION HISTORY TAB
+    # -------------------------------------------------------------------------
+    def _build_history_tab(self):
+        """Build the filter/sort controls and the history table inside the history tab."""
+        dpg.add_spacer(height=6)
+
+        # --- Filter / Sort controls ---
+        with dpg.group(horizontal=True):
+            dpg.add_text("Filter Source:")
+            dpg.add_combo(
+                ["All", "Prescribed", "ACC"],
+                default_value="All",
+                width=120,
+                tag="rb_hist_filter_source",
+                callback=self._on_hist_filter_change,
+            )
+            dpg.add_spacer(width=20)
+            dpg.add_text("Sort by:")
+            dpg.add_combo(
+                ["Date/Time", "BPM", "Ratio", "Score", "Phase/PLV", "PT Amp", "LFnu"],
+                default_value="Date/Time",
+                width=130,
+                tag="rb_hist_sort_col",
+                callback=self._on_hist_sort_change,
+            )
+            dpg.add_combo(
+                ["Descending", "Ascending"],
+                default_value="Descending",
+                width=120,
+                tag="rb_hist_sort_dir",
+                callback=self._on_hist_sort_change,
+            )
+            dpg.add_spacer(width=20)
+            dpg.add_button(
+                label="Clear History",
+                tag="rb_hist_clear_btn",
+                callback=self._on_hist_clear,
+                width=120,
+            )
+
+        dpg.add_spacer(height=6)
+        dpg.add_text("", tag="rb_hist_count_text", color=(150, 150, 150))
+        dpg.add_spacer(height=4)
+
+        with dpg.table(
+            header_row=True,
+            tag="rb_history_table",
+            borders_innerH=True,
+            borders_outerH=True,
+            borders_innerV=True,
+            scrollY=True,
+            freeze_rows=1,
+            height=400,
+        ):
+            dpg.add_table_column(label="Date / Time", width_fixed=True, init_width_or_weight=145)
+            dpg.add_table_column(label="BPM", width_fixed=True, init_width_or_weight=60)
+            dpg.add_table_column(label="Ratio", width_fixed=True, init_width_or_weight=60)
+            dpg.add_table_column(label="Score", width_fixed=True, init_width_or_weight=70)
+            dpg.add_table_column(label="Phase/PLV", width_fixed=True, init_width_or_weight=85)
+            dpg.add_table_column(label="PT Amp", width_fixed=True, init_width_or_weight=75)
+            dpg.add_table_column(label="LFnu", width_fixed=True, init_width_or_weight=65)
+            dpg.add_table_column(label="Source", width_fixed=True, init_width_or_weight=90)
+
+    # Column-key mapping from combo label → dict key
+    _HIST_COL_MAP = {
+        "Date/Time": "session_ts",
+        "BPM": "bpm",
+        "Ratio": "ratio",
+        "Score": "score",
+        "Phase/PLV": "phase",
+        "PT Amp": "pt",
+        "LFnu": "lf",
+    }
+
+    def _on_hist_filter_change(self, sender, app_data):
+        self._hist_filter_source = app_data
+        self._refresh_history_ui()
+
+    def _on_hist_sort_change(self, sender, app_data):
+        col_label = dpg.get_value("rb_hist_sort_col")
+        self._hist_sort_col = self._HIST_COL_MAP.get(col_label, "session_ts")
+        self._hist_sort_asc = dpg.get_value("rb_hist_sort_dir") == "Ascending"
+        self._refresh_history_ui()
+
+    def _on_hist_clear(self, sender, app_data):
+        """Wipe rf_history.json and reset all in-memory history."""
+        self.history.clear()
+        self._all_session_entries.clear()
+        self.historical_optimal = None
+        try:
+            with open(_HISTORY_FILE, "w") as f:
+                json.dump([], f)
+        except Exception as e:
+            logger.error(f"Failed to clear RF history: {e}")
+        if self._built and dpg.does_item_exist("rb_history_display"):
+            dpg.set_value("rb_history_display", "Historical Optimal: None (Run a Global Sweep)")
+            dpg.configure_item("rb_history_display", color=(150, 150, 150))
+        self._refresh_history_ui()
+
+    def _refresh_history_ui(self):
+        """Repopulate the history table from self._all_session_entries."""
+        if not self._built or not dpg.does_item_exist("rb_history_table"):
+            return
+
+        # Clear existing rows
+        if children := dpg.get_item_children("rb_history_table", 1):
+            for child in children:
+                dpg.delete_item(child)
+
+        # Filter
+        source_filter = self._hist_filter_source
+        if source_filter == "All":
+            entries = list(self._all_session_entries)
+        elif source_filter == "Prescribed":
+            entries = [e for e in self._all_session_entries if e["source"] == "prescribed"]
+        else:  # ACC
+            entries = [e for e in self._all_session_entries if e["source"] == "acc"]
+
+        # Sort — ratio can be "Cont" (string) so coerce to float for numeric sort
+        sort_key = self._hist_sort_col
+        def _sort_val(x):
+            v = x.get(sort_key, 0)
+            if sort_key == "ratio":
+                return -1.0 if v == "Cont" else float(v)
+            return v
+        entries.sort(key=_sort_val, reverse=not self._hist_sort_asc)
+
+        # Update count label
+        if dpg.does_item_exist("rb_hist_count_text"):
+            dpg.set_value("rb_hist_count_text", f"{len(entries)} session entries")
+
+        # Populate rows
+        for entry in entries:
+            score = entry["score"]
+            score_color = list(_coherence_to_base_color(score)) + [255]
+            ratio_val = entry["ratio"]
+            if ratio_val == "Cont":
+                ratio_str = "Cont"
+            else:
+                # Show as integer if whole number (e.g. 1.0 → "1:1"), else 1 decimal
+                r = float(ratio_val)
+                ratio_str = f"1:{int(r)}" if r == int(r) else f"1:{r:.1f}"
+            source_str = "ACC" if entry["source"] == "acc" else "Prescribed"
+            with dpg.table_row(parent="rb_history_table"):
+                dpg.add_text(entry["session_dt"])
+                dpg.add_text(f"{entry['bpm']:.1f}")
+                dpg.add_text(ratio_str)
+                dpg.add_text(f"{score:.1f}", color=score_color)
+                dpg.add_text(f"{entry['phase'] * 100:.1f}%")
+                dpg.add_text(f"{entry['pt']:.1f}")
+                dpg.add_text(f"{entry['lf']:.1f}%")
+                dpg.add_text(source_str, color=(100, 200, 255) if entry["source"] == "acc" else (200, 200, 200))
+
     def _clear_leaderboard_ui(self):
         for tag in ("rb_leaderboard_table", "rb_leaderboard_acc_table"):
             if dpg.does_item_exist(tag):
@@ -755,6 +951,8 @@ class ResonanceBreathingWidget:
         self._populate_table("rb_leaderboard_table", self._leaderboards["prescribed"])
         # ACC leaderboard
         self._populate_table("rb_leaderboard_acc_table", self._leaderboards["acc"])
+        # Refresh history tab whenever a new entry is added
+        self._refresh_history_ui()
 
     def _update_manual_pacer(self, sender, app_data):
         self.m_in, self.m_hi, self.m_ex, self.m_he = (dpg.get_value(t) for t in ["rb_m_in", "rb_m_hi", "rb_m_ex", "rb_m_he"])
