@@ -23,7 +23,7 @@ from src.utils.ipc import (
 from src.processing.math_utils import (
     calculate_rmssd, interpolate_hr_stream, calculate_coherence_score,
     calculate_resonance_metrics, pan_tompkins_energy, find_peaks, reject_artifacts,
-    calculate_metrics
+    calculate_metrics, reject_rr_artifacts
 )
 from src.recording.session_recorder import SessionRecorder
 
@@ -182,9 +182,11 @@ class SignalProcessor:
             for rr_ms in rr_intervals:
                 self.session_recorder.add_rr_interval(rr_ms=rr_ms)
 
-        # Add RR intervals to buffers
+        # Add RR intervals to buffers — pre-filter with the same absolute bounds
+        # used by reject_rr_artifacts() so the buffer never contains artefacts.
+        # (333–1500 ms = 40–180 BPM, tighter than the old 300–2000 ms check.)
         for rr_ms in rr_intervals:
-            if 300 < rr_ms < 2000:  # Basic physiological validity check
+            if 333 <= rr_ms <= 1500:
                 self.rr_intervals.append(rr_ms)
                 self.rr_buffer.append((timestamp, rr_ms))
 
