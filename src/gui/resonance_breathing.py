@@ -15,24 +15,34 @@ from src.processing.resonance_math import PhysiologicalMath, ContinuousPacer, Co
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Coherence score → base RGB color mapping
-# Scores are 0–100 (roughly). We want white/yellow/pink to be very rare
-# (only achievable at elite levels), so the thresholds are intentionally
-# demanding at the top end.
+# Leaderboard score → base RGB color mapping
+#
+# The leaderboard score from score_epoch() is multiplied by 100 and can
+# theoretically reach ~260 (phase=1.0, pt_amp=5×baseline, lf_nu=100%,
+# rmssd=5×baseline).  In practice, scores above ~220 are extraordinary.
+#
+# Scale (designed so blue ≈ 200, white/yellow/pink are very rare):
+#   Red    0 – 80    low
+#   Orange 80 – 130  fair
+#   Green  130 – 170 good
+#   Blue   170 – 210 very good
+#   Pink   210 – 230 excellent    (rare)
+#   Yellow 230 – 245 exceptional  (very rare)
+#   White  245+      extraordinary (almost never seen)
 # ---------------------------------------------------------------------------
 _COHERENCE_COLORS = [
     # (min_score, (R, G, B))
-    (90, (255, 255, 255)),   # White  — extraordinary (>90)
-    (80, (255, 255,   0)),   # Yellow — exceptional  (80–90)
-    (70, (255, 105, 180)),   # Pink   — excellent    (70–80)
-    (55, (  0,   0, 255)),   # Blue   — very good    (55–70)
-    (40, (  0, 200,   0)),   # Green  — good         (40–55)
-    (25, (255, 140,   0)),   # Orange — fair         (25–40)
-    ( 0, (255,   0,   0)),   # Red    — low          ( 0–25)
+    (245, (255, 255, 255)),   # White  — extraordinary (≥245)
+    (230, (255, 255,   0)),   # Yellow — exceptional  (230–245)
+    (210, (255, 105, 180)),   # Pink   — excellent    (210–230)
+    (170, (  0,   0, 255)),   # Blue   — very good    (170–210)
+    (130, (  0, 200,   0)),   # Green  — good         (130–170)
+    ( 80, (255, 140,   0)),   # Orange — fair         (80–130)
+    (  0, (255,   0,   0)),   # Red    — low          (0–80)
 ]
 
 def _coherence_to_base_color(score: float):
-    """Return (R, G, B) base color for the given coherence score."""
+    """Return (R, G, B) base color for the given leaderboard score (0–260+)."""
     for threshold, color in _COHERENCE_COLORS:
         if score >= threshold:
             return color
@@ -62,7 +72,8 @@ class ResonanceBreathingWidget:
         self._ltx_flash_timer = None   # threading.Timer for flash-back
         self._ltx_prev_vol = 0.0       # previous breath bar volume (0–1)
         self._ltx_prev_phase = ""      # previous phase text
-        self._latest_coherence = 0.0   # kept in sync by update_resonance_score()
+        self._latest_coherence = 0.0   # live coherence (0–100), for UI display
+        self._latest_lb_score = 0.0    # leaderboard score (0–260+), drives ball color
         
         self.math = PhysiologicalMath()
         self.continuous_pacer = None
@@ -107,7 +118,13 @@ class ResonanceBreathingWidget:
             try:
                 with open(_HISTORY_FILE, "r") as f:
                     self.history = json.load(f)
-                    if self.history: self.historical_optimal = self.history[-1].get("best", None)
+                    if self.history:
+                        self.historical_optimal = self.history[-1].get("best", None)
+                        # Seed ball color from the best historical score
+                        if self.historical_optimal:
+                            self._latest_lb_score = float(
+                                self.historical_optimal.get("score", 0.0)
+                            )
             except Exception as e: logger.error(f"Failed to load RF history: {e}")
 
     def _save_history(self, best_node, leaderboard):
@@ -190,12 +207,26 @@ class ResonanceBreathingWidget:
                         dpg.add_text("Coherence Score: ")
                         dpg.add_text("0.0", tag="rb_manual_coherence", color=(0, 255, 0))
                     dpg.add_spacer(height=8)
-                    dpg.add_checkbox(
-                        label="Use LTX Ball (breath bar → brightness, coherence → color)",
-                        tag="rb_use_ltx_checkbox",
-                        default_value=False,
-                        callback=self._on_ltx_toggle,
-                    )
+                    with dpg.group(horizontal=True):
+                        dpg.add_checkbox(
+                            label="Use LTX Ball (breath bar → brightness, coherence → color)",
+                            tag="rb_use_ltx_checkbox",
+                            default_value=False,
+                            callback=self._on_ltx_toggle,
+                        )
+                        dpg.add_spacer(width=14)
+                        # Visual ball model — always visible, mirrors real ball state
+                        with dpg.drawlist(width=36, height=36, tag="rb_ltx_ball_drawlist"):
+                            dpg.draw_circle(
+                                center=(18, 18), radius=15,
+                                color=(200, 200, 200, 180), thickness=2,
+                            )
+                            dpg.draw_circle(
+                                center=(18, 18), radius=13,
+                                fill=(30, 30, 30, 255),
+                                color=(0, 0, 0, 0),
+                                tag="rb_ltx_ball_fill",
+                            )
 
                 # --- Leaderboard tab: two sub-tabs for prescribed vs ACC ---
                 with dpg.tab(label="Assessment Leaderboard", tag="rb_leaderboard_tab"):
@@ -306,7 +337,8 @@ class ResonanceBreathingWidget:
     def _on_ltx_toggle(self, sender, app_data):
         self._use_ltx_ball = bool(app_data)
         if not self._use_ltx_ball and self._led_ball is not None:
-            # Turn ball off when feature is disabled
+            # Turn the real ball off when feature is disabled;
+            # the UI circle continues to show the current state.
             self._cancel_flash_timer()
             self._led_ball.send_color(0, 0, 0)
 
@@ -325,29 +357,34 @@ class ResonanceBreathingWidget:
             self._ltx_flash_timer = None
 
     def _send_ball_color(self, r: int, g: int, b: int):
-        """Send color to ball, clamping values to 0–255."""
-        if self._led_ball is None:
-            return
-        self._led_ball.send_color(
-            max(0, min(255, r)),
-            max(0, min(255, g)),
-            max(0, min(255, b)),
-        )
+        """Send color to the real ball (clamped) AND update the UI circle."""
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        self._set_ui_ball_color(r, g, b)
+        if self._use_ltx_ball and self._led_ball is not None:
+            self._led_ball.send_color(r, g, b)
+
+    def _set_ui_ball_color(self, r: int, g: int, b: int):
+        """Update only the on-screen ball circle (safe to call from any thread)."""
+        if self._built and dpg.does_item_exist("rb_ltx_ball_fill"):
+            dpg.configure_item("rb_ltx_ball_fill", fill=(r, g, b, 255))
 
     def _update_ltx_ball(self, vol: float, phase_txt: str):
-        """Drive the LTX ball from the current breath bar state.
+        """Drive the UI ball model (and optionally the real ball) from the breath bar.
 
         vol       — breath bar fill fraction 0.0 (empty) → 1.0 (full)
         phase_txt — "INHALE", "EXHALE", "HOLD FULL", "HOLD EMPTY"
-        """
-        if not self._use_ltx_ball or self._led_ball is None:
-            return
 
-        br, bg, bb = _coherence_to_base_color(self._latest_coherence)
+        The UI circle always updates regardless of whether the real ball is
+        enabled or connected.
+        """
+        # Use the leaderboard score (0–260+) for color; falls back to 0 until
+        # the first assessment block completes.
+        br, bg, bb = _coherence_to_base_color(self._latest_lb_score)
 
         # Detect phase transitions for flash effects
         prev_vol = self._ltx_prev_vol
-        prev_phase = self._ltx_prev_phase
 
         # Peak-inhale flash: bar just reached full (vol ≥ 0.98) and was rising
         at_peak = vol >= 0.98 and prev_vol < 0.98 and phase_txt in ("INHALE", "HOLD FULL")
@@ -358,11 +395,10 @@ class ResonanceBreathingWidget:
         self._ltx_prev_phase = phase_txt
 
         if at_peak:
-            # Flash to black for 100 ms, then restore brightness
+            # Flash to black for 100 ms, then restore full brightness
             self._cancel_flash_timer()
             self._send_ball_color(0, 0, 0)
             def _restore_peak():
-                # After flash, ball should be at full brightness
                 self._send_ball_color(br, bg, bb)
             self._ltx_flash_timer = threading.Timer(0.1, _restore_peak)
             self._ltx_flash_timer.daemon = True
@@ -370,11 +406,10 @@ class ResonanceBreathingWidget:
             return
 
         if at_trough:
-            # Flash to full brightness for 100 ms, then restore dim
+            # Flash to full brightness for 100 ms, then restore dim level
             self._cancel_flash_timer()
             self._send_ball_color(br, bg, bb)
             def _restore_trough():
-                # After flash, ball should be at minimum brightness (dim)
                 dim_r = max(10, int(br * 0.05))
                 dim_g = max(10, int(bg * 0.05))
                 dim_b = max(10, int(bb * 0.05))
@@ -384,7 +419,7 @@ class ResonanceBreathingWidget:
             self._ltx_flash_timer.start()
             return
 
-        # Normal brightness: scale base color by vol (min 5% so ball never fully off)
+        # Normal: scale base color by vol (min 5% so circle never goes fully dark)
         brightness = 0.05 + 0.95 * vol
         self._send_ball_color(
             int(br * brightness),
@@ -605,6 +640,9 @@ class ResonanceBreathingWidget:
         )
 
         score = self.math.score_epoch(rmssd, pt, lf_nu, phase, self.baseline_metrics)
+        # Keep the best leaderboard score seen so far — drives ball color
+        if score > self._latest_lb_score:
+            self._latest_lb_score = score
         entry = {
             'bpm': bpm,
             'ratio': ratio,
@@ -637,6 +675,8 @@ class ResonanceBreathingWidget:
             best_bpm, best_score = csm.extract_resonance_frequency(
                 time_grid, lf_power, pt_amp, plv, bpm_arr
             )
+            if best_score > self._latest_lb_score:
+                self._latest_lb_score = best_score
             entry = {
                 'bpm': round(best_bpm, 1), 'ratio': "Cont",
                 'score': best_score, 'rmssd': 0.0, 'lf': 0.0, 'pt': 0.0, 'phase': 0.0,
