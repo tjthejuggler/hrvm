@@ -157,6 +157,7 @@ class ResonanceBreathingWidget:
                     "pt": entry.get("pt", 0.0),
                     "lf": entry.get("lf", 0.0),
                     "source": entry.get("source", "prescribed"),
+                    "valid": entry.get("valid", True),  # default True for old entries
                 }
                 self._all_session_entries.append(flat)
 
@@ -681,7 +682,14 @@ class ResonanceBreathingWidget:
             self._epoch_rr, self._epoch_ts, i_sec, e_sec
         )
 
-        score = self.math.score_epoch(rmssd, pt, lf_nu, phase, self.baseline_metrics)
+        score, is_valid = self.math.score_epoch(rmssd, pt, lf_nu, phase, self.baseline_metrics)
+
+        if not is_valid:
+            logger.info(
+                f"Stepped epoch {bpm} BPM (1:{ratio}) flagged as low-quality "
+                f"(phase={phase:.2f}, pt={pt:.2f}) — recorded with quality warning."
+            )
+
         # Keep the best leaderboard score seen so far — drives ball color
         if score > self._latest_lb_score:
             self._latest_lb_score = score
@@ -694,6 +702,7 @@ class ResonanceBreathingWidget:
             'pt': pt,
             'phase': phase,
             'source': 'acc' if self._use_acc_breathing else 'prescribed',
+            'valid': is_valid,
         }
         self.leaderboard.append(entry)
         # Route to the appropriate sub-leaderboard
@@ -717,12 +726,33 @@ class ResonanceBreathingWidget:
             best_bpm, best_score = csm.extract_resonance_frequency(
                 time_grid, lf_power, pt_amp, plv, bpm_arr
             )
+
+            if best_bpm is None:
+                # Quality gates not met — session was inconclusive
+                logger.warning(
+                    "Continuous assessment inconclusive: PLV never reached threshold "
+                    "or no clear resonance peak found. Result not saved."
+                )
+                self.state = self.STATE_COMPLETE
+                dpg.configure_item("rb_start_assess_btn", show=True)
+                dpg.configure_item("rb_stop_assess_btn", show=False)
+                dpg.configure_item("rb_preset_combo", enabled=True)
+                dpg.configure_item("rb_manual_start_btn", enabled=self._hr_connected)
+                self._update_hud(
+                    "ASSESSMENT INCONCLUSIVE",
+                    "No clear resonance peak detected. Please try again in a calm state.",
+                    1.0, (255, 165, 0),
+                )
+                dpg.set_value("rb_total_time_text", "INCONCLUSIVE")
+                return
+
             if best_score > self._latest_lb_score:
                 self._latest_lb_score = best_score
             entry = {
                 'bpm': round(best_bpm, 1), 'ratio': "Cont",
                 'score': best_score, 'rmssd': 0.0, 'lf': 0.0, 'pt': 0.0, 'phase': 0.0,
                 'source': 'acc' if self._use_acc_breathing else 'prescribed',
+                'valid': True,
             }
             self.leaderboard.append(entry)
             source_key = 'acc' if self._use_acc_breathing else 'prescribed'
@@ -900,7 +930,10 @@ class ResonanceBreathingWidget:
         # Populate rows
         for entry in entries:
             score = entry["score"]
+            is_valid = entry.get("valid", True)
             score_color = list(_coherence_to_base_color(score)) + [255]
+            if not is_valid:
+                score_color = [180, 120, 0, 255]  # dim amber for low-quality epochs
             ratio_val = entry["ratio"]
             if ratio_val == "Cont":
                 ratio_str = "Cont"
@@ -909,11 +942,12 @@ class ResonanceBreathingWidget:
                 r = float(ratio_val)
                 ratio_str = f"1:{int(r)}" if r == int(r) else f"1:{r:.1f}"
             source_str = "ACC" if entry["source"] == "acc" else "Prescribed"
+            score_display = f"{score:.1f}" if is_valid else f"{score:.1f} ⚠"
             with dpg.table_row(parent="rb_history_table"):
                 dpg.add_text(entry["session_dt"])
                 dpg.add_text(f"{entry['bpm']:.1f}")
                 dpg.add_text(ratio_str)
-                dpg.add_text(f"{score:.1f}", color=score_color)
+                dpg.add_text(score_display, color=score_color)
                 dpg.add_text(f"{entry['phase'] * 100:.1f}%")
                 dpg.add_text(f"{entry['pt']:.1f}")
                 dpg.add_text(f"{entry['lf']:.1f}%")
@@ -927,20 +961,28 @@ class ResonanceBreathingWidget:
                         dpg.delete_item(child)
 
     def _populate_table(self, table_tag: str, entries: list):
-        """Fill a leaderboard table with sorted entries."""
+        """Fill a leaderboard table with sorted entries.
+
+        Entries flagged as invalid (valid=False) are shown with a ⚠ marker and
+        dimmed score color to indicate the result did not meet quality thresholds.
+        """
         if not dpg.does_item_exist(table_tag):
             return
         for rank, data in enumerate(
             sorted(entries, key=lambda x: x['score'], reverse=True), 1
         ):
+            is_valid = data.get('valid', True)  # default True for old history entries
             with dpg.table_row(parent=table_tag):
                 dpg.add_text(f"#{rank}")
                 dpg.add_text(f"{data['bpm']:.1f}")
                 dpg.add_text(str(data['ratio']))
-                dpg.add_text(
-                    f"{data['score']:.1f}",
-                    color=(255, 215, 0) if rank == 1 else (255, 255, 255),
-                )
+                if is_valid:
+                    score_color = (255, 215, 0) if rank == 1 else (255, 255, 255)
+                    score_text = f"{data['score']:.1f}"
+                else:
+                    score_color = (180, 120, 0)   # dim amber — low quality
+                    score_text = f"{data['score']:.1f} ⚠"
+                dpg.add_text(score_text, color=score_color)
                 dpg.add_text(f"{data.get('phase', 0.0)*100:.1f}%")
                 dpg.add_text(f"{data.get('pt', 0.0):.1f}")
                 dpg.add_text(f"{data.get('lf', 0.0):.1f}%")

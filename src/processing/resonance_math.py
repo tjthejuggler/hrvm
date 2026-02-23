@@ -81,12 +81,30 @@ class PhysiologicalMath:
         max_lag = cycle_sec / 2.0
         return float(1.0 - (min(abs(best_lag_sec), max_lag) / max_lag))
         
+    # Minimum thresholds for a stepped epoch to be considered valid/conclusive.
+    # phase < MIN_PHASE_SYNCHRONY  → HR is not following the breath pacer at all.
+    # pt_amp < MIN_PT_AMPLITUDE    → RSA swing is too small to be physiologically meaningful.
+    MIN_PHASE_SYNCHRONY: float = 0.25   # 0–1 scale; below this = no meaningful phase locking
+    MIN_PT_AMPLITUDE: float = 1.5       # BPM; below this = RSA too small to interpret
+
     @staticmethod
-    def score_epoch(rmssd: float, pt_amp: float, lf_nu: float, phase: float, baseline: Dict) -> float:
+    def score_epoch(rmssd: float, pt_amp: float, lf_nu: float, phase: float, baseline: Dict) -> Tuple[float, bool]:
+        """Calculate the composite resonance score for a stepped test epoch.
+
+        Returns:
+            (score, is_valid) — score is 0–260+; is_valid is False when the
+            epoch does not meet minimum quality thresholds (phase synchrony or
+            PT amplitude too low), indicating the result should not be trusted.
+        """
         b_rmssd = baseline.get('rmssd', 1.0) or 1.0
         b_pt = baseline.get('pt_amp', 1.0) or 1.0
         score = (phase * 0.40) + (min(pt_amp / b_pt, 5.0) * 0.30) + (min(lf_nu / 100.0, 1.0) * 0.20) + (min(rmssd / b_rmssd, 5.0) * 0.10)
-        return round(score * 100, 2)
+
+        is_valid = (
+            phase >= PhysiologicalMath.MIN_PHASE_SYNCHRONY
+            and pt_amp >= PhysiologicalMath.MIN_PT_AMPLITUDE
+        )
+        return round(score * 100, 2), is_valid
 
 # -------------------------------------------------------------------------
 # 2. NON-STATIONARY DYNAMIC PACER (For Continuous Window Protocol)
@@ -160,21 +178,47 @@ class ContinuousSlidingMath:
         
         return pt_amplitude, np.abs(plv_complex)
 
+    # Minimum quality thresholds for the continuous protocol result to be conclusive.
+    # PLV_THRESHOLD: peak PLV must exceed this at some point during the session.
+    #   PLV < 0.3 means HR phase and breath phase were essentially uncorrelated throughout.
+    # PEAK_SHAPE_RATIO: peak resonance_index must be at least this multiple of the session
+    #   mean. A flat curve (ratio < 1.5) means there is no clear resonance peak — just noise.
+    PLV_THRESHOLD: float = 0.3
+    PEAK_SHAPE_RATIO: float = 1.5
+
     @staticmethod
-    def extract_resonance_frequency(time_grid, lf_power, pt_amp, plv, pacing_bpm):
+    def extract_resonance_frequency(time_grid, lf_power, pt_amp, plv, pacing_bpm) -> Tuple[Optional[float], float]:
+        """Find the resonance frequency from the continuous sliding-window metrics.
+
+        Returns:
+            (best_bpm, score) — best_bpm is None and score is 0.0 when the
+            session does not meet minimum quality thresholds, indicating the
+            result is inconclusive and should not be saved as a resonance frequency.
+        """
         def normalize(x):
             x = np.nan_to_num(x, nan=np.nanmedian(x) if len(x)>0 else 0)
             ptp = np.ptp(x)
             return (x - np.min(x)) / ptp if ptp != 0 else np.zeros_like(x)
-            
-        resonance_index = (0.4 * normalize(lf_power)) + (0.4 * normalize(pt_amp)) + (0.2 * normalize(plv))
-        
+
+        # --- Quality gate 1: PLV must reach the minimum threshold at some point ---
+        plv_clean = np.nan_to_num(plv, nan=0.0)
+        if np.max(plv_clean) < ContinuousSlidingMath.PLV_THRESHOLD:
+            return None, 0.0
+
+        resonance_index = (0.4 * normalize(lf_power)) + (0.4 * normalize(pt_amp)) + (0.2 * normalize(plv_clean))
+
         b, a = scipy.signal.butter(2, 0.05 / (0.5 * 4.0), btype='low')
         resonance_smoothed = scipy.signal.filtfilt(b, a, resonance_index)
-        
+
+        # --- Quality gate 2: peak must be clearly above the session mean (no flat curve) ---
+        mean_val = np.mean(resonance_smoothed)
+        peak_val = np.max(resonance_smoothed)
+        if mean_val > 0 and (peak_val / mean_val) < ContinuousSlidingMath.PEAK_SHAPE_RATIO:
+            return None, 0.0
+
         max_idx = np.argmax(resonance_smoothed)
         t_max = time_grid[max_idx]
-        
+
         # 5 Second Baroreflex Delay Correction
         stimulus_idx = (np.abs(time_grid - max(0.0, t_max - 5.0))).argmin()
         return float(pacing_bpm[stimulus_idx]), float(resonance_index[max_idx]) * 100.0
