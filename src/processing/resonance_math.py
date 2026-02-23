@@ -11,7 +11,7 @@ import scipy.interpolate
 import scipy.signal
 import scipy.ndimage
 import pywt
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
 # -------------------------------------------------------------------------
 # 1. STATIONARY METRICS (For Stepped Protocols)
