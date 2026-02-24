@@ -57,6 +57,7 @@ from src.gui.ticwatch_charts import (
     TicWatchRightAccChart, TicWatchRightGyroChart, TicWatchRightMagChart,
 )
 from src.gui.ltx_controller import LTXApp
+from src.gui.juggling_counter import JugglingWidget
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,9 @@ class UIManager:
 
         # LTX controller app
         self.ltx_app = LTXApp()
+
+        # Juggling counter app
+        self.juggling_counter = JugglingWidget()
 
         # Genki Wave manager + bar + charts
         self.genki_manager = GenkiWaveManager()
@@ -405,6 +409,7 @@ class UIManager:
                         self.counting_game.build("apps_container")
                         self.rapid_change_game.build("apps_container")
                         self.resonance_breathing.build("apps_container")
+                        self.juggling_counter.build("apps_container")
                         dpg.add_spacer(height=10, parent="apps_container")
                         self.ltx_app.build("apps_container")
 
@@ -1016,6 +1021,7 @@ class UIManager:
             self.counting_game.tick()
             self.rapid_change_game.tick()
             self.resonance_breathing.tick()
+            self.juggling_counter.tick()
 
             dpg.render_dearpygui_frame()
 
@@ -1692,6 +1698,7 @@ class UIManager:
             self.tw_left_mag_chart.add_samples(left_samples)
             self.tw_left_mag_chart.update_plot()
             self.ltx_app.feed_ticwatch_data("left", left_samples)
+            self.juggling_counter.feed_left(left_samples)
 
         self.tw_right_bar.poll_status()
         right_samples = self.tw_right_manager.poll()
@@ -1703,6 +1710,7 @@ class UIManager:
             self.tw_right_mag_chart.add_samples(right_samples)
             self.tw_right_mag_chart.update_plot()
             self.ltx_app.feed_ticwatch_data("right", right_samples)
+            self.juggling_counter.feed_right(right_samples)
 
     # --- Polar Verity Sense Polling ---
 

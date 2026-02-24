@@ -176,8 +176,26 @@ Both watches are available as independent trigger sources in the LTX Controller:
 - **TicWatch Left** — Accelerometer, Gyroscope, Magnetometer
 - **TicWatch Right** — Accelerometer, Gyroscope, Magnetometer
 
+### Packet Format
+
+The watch app sends one line per sensor event:
+
+```
+<type>,<hw_ns>,<x>,<y>,<z>\n
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | `A` = accelerometer, `G` = gyroscope, `M` = magnetometer |
+| `hw_ns` | Android `event.timestamp` — nanoseconds since last watch boot (hardware clock) |
+| `x`, `y`, `z` | Sensor values in sensor-native units (m/s², rad/s, µT) |
+
+`hw_ns` is divided by `1 000 000` on the PC side to produce milliseconds, which are used as the chart X-axis.  This eliminates network-jitter distortion: even if multiple packets arrive simultaneously, their hardware timestamps place them correctly spaced on the graph.
+
+A legacy 4-field format (`<type>,<x>,<y>,<z>`) is also accepted for backwards compatibility; in that case the PC wall-clock time is used as a fallback timestamp.
+
 ### Files
-- **`src/ble/ticwatch_manager.py`**: `SingleTicWatchManager` — per-watch server supporting ADB (TCP) and UDP modes. Call `set_mode(MODE_ADB)` or `set_mode(MODE_UDP)` before `start()`. Ports hardcoded (`PORT_LEFT=5555`, `PORT_RIGHT=5556`). In ADB mode accepts one TCP connection at a time and re-listens automatically after disconnect. In UDP mode receives datagrams continuously.
+- **`src/ble/ticwatch_manager.py`**: `SingleTicWatchManager` — per-watch server supporting ADB (TCP) and UDP modes. Call `set_mode(MODE_ADB)` or `set_mode(MODE_UDP)` before `start()`. Ports hardcoded (`PORT_LEFT=5555`, `PORT_RIGHT=5556`). In ADB mode accepts one TCP connection at a time and re-listens automatically after disconnect. In UDP mode receives datagrams continuously. `TicWatchSample` now carries both `hw_timestamp_ms` (watch hardware clock, ms) and `pc_timestamp` (PC wall-clock receipt time).
 - **`src/gui/ticwatch_bar.py`**: `TicWatchLeftBar` (purple) and `TicWatchRightBar` (cyan) — each an independent bar row with port label, ADB/UDP mode dropdown, status dot, and Start/Stop button. The dropdown is disabled while the listener is running.
 - **`src/gui/ticwatch_charts.py`**: Chart widgets for both watches: `TicWatchLeftAccChart`, `TicWatchLeftGyroChart`, `TicWatchLeftMagChart`, `TicWatchRightAccChart`, `TicWatchRightGyroChart`, `TicWatchRightMagChart`.
 
@@ -194,6 +212,7 @@ Both watches are available as independent trigger sources in the LTX Controller:
 - **`src/gui/counting_game.py`**: Heartbeat Counting Game module. Contains `CountingGameController` (state machine: idle → counting → input), `CountingGameWidget` (DearPyGui controls + scatter chart), and JSON persistence functions (`load_game_history`, `save_game_entry`). Data is stored in `counting_game_data.json`.
 - **`src/gui/resonance_breathing.py`**: Resonance Breathing App. `ResonanceBreathingWidget` provides manual timing inputs, a Start/Stop button, an animated `PacerEngine` breathing circle, and a session-history bar chart. Sessions are persisted via `DatabaseManager.save_breathing_session()` and loaded on startup via `get_breathing_sessions()`.
 - **`src/gui/rapid_change_game.py`**: Rapid Change Game. `RapidChangeController` (state machine: idle → racing → returning → finished) and `RapidChangeWidget` (DearPyGui controls + bar chart + past-config list). Settings: mode (one_way / return), Start HR, End/Peak HR, and **Breathing Only** checkbox. All threshold crossings require **5 consecutive readings** beyond the target before the condition is confirmed, preventing false triggers from noisy sensor data. History is persisted to `rapid_change_data.json`; the bar chart and past-config list filter by the exact current settings (including `breathing_only`).
+- **`src/gui/juggling_counter.py`**: Juggling Counter app. `HandCounter` applies a 3-sample moving-average to the ACC magnitude and uses peak detection with a configurable cooldown to count catches per hand. `JugglingWidget` (DearPyGui tree node) shows threshold and cooldown sliders, Start / Stop / Reset controls, and large per-hand (Left, Right) and Total catch counts. Works with one or both TicWatches — whichever is connected contributes its ACC data automatically.
 - **`src/recording/`**: Session recording for chess-coach integration. `SessionRecorder` accumulates HR/RR data in memory and writes JSON files on session stop.
 - **`src/database/`**: SQLite storage for session data.
 - **`src/utils/ipc.py`**: IPC data classes (`HRBatch`, `ECGBatch`, `ACCBatch`, `ProcessedData`, `BLECommand`).
@@ -239,6 +258,10 @@ If the application fails to find the device or connects and immediately disconne
 MIT License
 
 ## Last Updated
+2026-02-24 10:57 CET — **TicWatch hardware timestamps**. The watch app now sends a 5-field payload (`<type>,<hw_ns>,<x>,<y>,<z>`) where `hw_ns` is Android's `event.timestamp` in nanoseconds since last boot. `_parse_line` in `src/ble/ticwatch_manager.py` converts this to milliseconds and stores it in the new `hw_timestamp_ms` field of `TicWatchSample` (alongside the existing `pc_timestamp` for recording). `ticwatch_charts.py` now uses `hw_timestamp_ms` for the chart X-axis, eliminating network-jitter distortion. Legacy 4-field packets are still accepted (PC clock used as fallback).
+
+2026-02-24 10:30 CET — **Juggling Counter app**. New `src/gui/juggling_counter.py` adds a juggling catch counter to the APPS section. `HandCounter` computes the 3-sample moving-average of the ACC magnitude from a TicWatch and registers a catch whenever the smoothed value exceeds a configurable **threshold** (default 15 m/s²) with a minimum **cooldown** between catches (default 0.3 s). `JugglingWidget` exposes both settings as sliders, shows large per-hand (Left, Right) and Total catch counts, and has Start / Stop / Reset controls. Works with one or both TicWatches simultaneously — each hand is counted independently. Integrated into `UIManager`: instantiated alongside other apps, built in `apps_container`, ticked each frame, and fed ACC samples from `_poll_ticwatch()`.
+
 2026-02-23 13:28 CET — **Settings persistence & UI state memory**. Two fixes in `src/gui/ui_manager.py`: (1) **Settings popup now persists correctly** — the LED Ball IP input no longer required pressing Enter to save; the IP is now read from the input field when the Close button is clicked (`_close_settings_popup()`). The Enable LED Ball checkbox now reflects the actual current state (`led_ball_enabled`) instead of always defaulting to `False`. (2) **Collapsing header state is remembered between runs** — the open/closed state of all collapsing headers (APPS, GRAPHS, HRV, Polar H10, Genki Wave, Polar Verity Sense, TicWatch Left, TicWatch Right) is saved to `ui_state.json` on app exit and restored on next launch. The same file also persists the LED Ball IP, LED Ball enabled state, and Breath Source selection, so these settings survive restarts without needing to open Settings.
 
 2026-02-23 10:48 CET — **Resonance Frequency Assessment: Session History tab**. The Assessment Leaderboard area now has a third sub-tab: **Session History**. Unlike the existing Prescribed Rate and ACC Breathing leaderboard tabs (which show cumulative best-per-BPM for the current session), the Session History tab shows **every individual test block ever completed**, loaded from `rf_history.json` on startup and updated live after each assessment. Each row shows: Date/Time, BPM, Ratio, Score (color-coded by coherence tier), Phase/PLV %, PT Amp, LFnu %, and Source (Prescribed / ACC). Controls: **Filter Source** (All / Prescribed / ACC), **Sort by** (any column), **Sort direction** (Ascending / Descending), and a **Clear History** button that wipes `rf_history.json` and resets the in-memory history. The history is rebuilt from the flat leaderboard arrays stored inside each run entry in `rf_history.json` — no schema changes required; existing history files are fully compatible.

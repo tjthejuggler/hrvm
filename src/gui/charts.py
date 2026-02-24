@@ -77,7 +77,7 @@ class HeartbeatChart(CollapsibleChart):
                 dpg.add_plot_legend()
                 dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="hb_x_axis")
                 with dpg.plot_axis(dpg.mvYAxis, label="RR Interval (ms)", tag="hb_y_axis"):
-                    dpg.add_stem_series([], [], label="RR (ms)", tag="hb_rr_series")
+                    dpg.add_line_series([], [], label="RR (ms)", tag="hb_rr_series")
                     dpg.set_axis_limits("hb_y_axis", 400, 1200)
 
     def add_beats(self, timestamp: float, rr_intervals: List[float], start_time: float):

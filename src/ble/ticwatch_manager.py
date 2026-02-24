@@ -49,9 +49,17 @@ MODE_UDP = "udp"
 
 @dataclass
 class TicWatchSample:
-    """One IMU sample from a TicWatch."""
-    timestamp: float
-    sensor: str          # "acc" | "gyro" | "mag"
+    """One IMU sample from a TicWatch.
+
+    hw_timestamp_ms: hardware timestamp from the watch sensor event, in
+                     milliseconds since last watch boot (converted from the
+                     nanosecond value in the UDP/TCP payload).
+    pc_timestamp:    PC wall-clock time (time.time()) when the packet was
+                     received — kept for session recording / DB storage.
+    """
+    hw_timestamp_ms: float   # watch hardware time in ms (X-axis source)
+    pc_timestamp: float      # PC wall-clock receipt time
+    sensor: str              # "acc" | "gyro" | "mag"
     x: float
     y: float
     z: float
@@ -258,7 +266,7 @@ class SingleTicWatchManager:
                     if sample is not None:
                         with self._buf_lock:
                             self._buf.append(sample)
-                        self._last_packet = sample.timestamp
+                        self._last_packet = sample.pc_timestamp
                         self._set_status(f"Streaming ({sample.sensor})")
         except Exception as e:
             logger.debug(f"TicWatch [{self._label}] TCP recv error: {e}")
@@ -297,7 +305,7 @@ class SingleTicWatchManager:
                 if sample is not None:
                     with self._buf_lock:
                         self._buf.append(sample)
-                    self._last_packet = sample.timestamp
+                    self._last_packet = sample.pc_timestamp
                     self._set_status(f"Streaming ({sample.sensor})")
 
     # ------------------------------------------------------------------
@@ -314,24 +322,53 @@ class SingleTicWatchManager:
 # ---------------------------------------------------------------------------
 
 def _parse_line(line: bytes, source: str) -> Optional[TicWatchSample]:
-    """Parse one newline-terminated payload line into a TicWatchSample."""
+    """Parse one newline-terminated payload line into a TicWatchSample.
+
+    Expected format (5 fields):
+        <type>,<hw_ns>,<x>,<y>,<z>
+    where <hw_ns> is the Android sensor event.timestamp in nanoseconds
+    since last watch boot.  It is converted to milliseconds here.
+
+    Legacy 4-field format (no hardware timestamp) is also accepted for
+    backwards compatibility; in that case hw_timestamp_ms falls back to
+    the PC wall-clock time in ms.
+    """
     try:
         text = line.decode("utf-8").strip()
         if not text:
             return None
         parts = text.split(",")
-        if len(parts) != 4:
+        pc_ts = time.time()
+
+        if len(parts) == 5:
+            # New format: type, hw_ns, x, y, z
+            sensor = _SENSOR_MAP.get(parts[0].upper())
+            if sensor is None:
+                return None
+            hw_timestamp_ms = int(parts[1]) / 1_000_000.0
+            return TicWatchSample(
+                hw_timestamp_ms=hw_timestamp_ms,
+                pc_timestamp=pc_ts,
+                sensor=sensor,
+                x=float(parts[2]),
+                y=float(parts[3]),
+                z=float(parts[4]),
+            )
+        elif len(parts) == 4:
+            # Legacy format: type, x, y, z — use PC clock as fallback
+            sensor = _SENSOR_MAP.get(parts[0].upper())
+            if sensor is None:
+                return None
+            return TicWatchSample(
+                hw_timestamp_ms=pc_ts * 1000.0,
+                pc_timestamp=pc_ts,
+                sensor=sensor,
+                x=float(parts[1]),
+                y=float(parts[2]),
+                z=float(parts[3]),
+            )
+        else:
             return None
-        sensor = _SENSOR_MAP.get(parts[0].upper())
-        if sensor is None:
-            return None
-        return TicWatchSample(
-            timestamp=time.time(),
-            sensor=sensor,
-            x=float(parts[1]),
-            y=float(parts[2]),
-            z=float(parts[3]),
-        )
     except Exception as e:
         logger.debug(f"TicWatch [{source}]: bad line '{line}': {e}")
         return None

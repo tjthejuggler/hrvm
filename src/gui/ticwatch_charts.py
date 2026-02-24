@@ -53,9 +53,11 @@ class _IMUXYZChart:
                                         tag=f"{self.tag_prefix}_z_series")
 
     def _add(self, sample: "TicWatchSample"):
+        # Use the watch's hardware timestamp (ms) for the X-axis so that
+        # network jitter does not distort the waveform spacing.
         if not self._start_time:
-            self._start_time = sample.timestamp
-        t = sample.timestamp - self._start_time
+            self._start_time = sample.hw_timestamp_ms
+        t = (sample.hw_timestamp_ms - self._start_time) / 1000.0  # → seconds
         self.ts.append(t)
         self.x.append(sample.x)
         self.y.append(sample.y)
