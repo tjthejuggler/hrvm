@@ -7,5 +7,41 @@
     "breathing_only": false,
     "elapsed_s": 40.01,
     "direction": "up"
+  },
+  {
+    "timestamp": 1772189307.5534928,
+    "mode": "one_way",
+    "start_hr": 85,
+    "end_hr": 100,
+    "breathing_only": false,
+    "elapsed_s": 8.42,
+    "direction": "up"
+  },
+  {
+    "timestamp": 1772189381.540097,
+    "mode": "one_way",
+    "start_hr": 105,
+    "end_hr": 70,
+    "breathing_only": false,
+    "elapsed_s": 44.57,
+    "direction": "down"
+  },
+  {
+    "timestamp": 1772189440.5417688,
+    "mode": "one_way",
+    "start_hr": 85,
+    "end_hr": 120,
+    "breathing_only": false,
+    "elapsed_s": 25.02,
+    "direction": "up"
+  },
+  {
+    "timestamp": 1772190194.5100882,
+    "mode": "one_way",
+    "start_hr": 135,
+    "end_hr": 70,
+    "breathing_only": true,
+    "elapsed_s": 736.12,
+    "direction": "down"
   }
 ]

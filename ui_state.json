@@ -1,6 +1,6 @@
 {
   "headers": {
-    "header_apps": false,
+    "header_apps": true,
     "header_graphs": true,
     "header_hrv": true,
     "header_polar_h10": true,

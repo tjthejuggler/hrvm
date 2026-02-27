@@ -21,8 +21,9 @@ from src.utils.ipc import (
     ProcessedData, ProcessingConfig, SystemCommand, CommandType
 )
 from src.processing.math_utils import (
-    calculate_rmssd, interpolate_hr_stream, calculate_coherence_score,
-    calculate_resonance_metrics, pan_tompkins_energy, find_peaks, reject_artifacts,
+    calculate_rmssd, interpolate_hr_stream, interpolate_rr_stream,
+    calculate_coherence_score, calculate_resonance_metrics,
+    pan_tompkins_energy, find_peaks, reject_artifacts,
     calculate_metrics, reject_rr_artifacts
 )
 from src.recording.session_recorder import SessionRecorder
@@ -49,8 +50,11 @@ class SignalProcessor:
             self.shm_buffer = None
 
         # Data Buffers
-        self.rr_buffer = deque(maxlen=1000) # Store (timestamp, rr_ms)
-        self.interpolated_hr_buffer = deque(maxlen=240) # Store 60s of 4Hz data
+        self.rr_buffer = deque(maxlen=1000)  # Store (timestamp, rr_ms)
+        self.interpolated_hr_buffer = deque(maxlen=240)  # Store 60s of 4Hz data
+        # SDNN requires a minimum 5-minute recording (Task Force 1996).
+        # This buffer holds up to 5 minutes of (timestamp, rr_ms) pairs.
+        self.sdnn_buffer = deque(maxlen=2000)  # ~5 min at 60–180 BPM
         
         # Signal Processing State
         self.sample_rate = 130
@@ -182,45 +186,49 @@ class SignalProcessor:
             for rr_ms in rr_intervals:
                 self.session_recorder.add_rr_interval(rr_ms=rr_ms)
 
-        # Add RR intervals to buffers — pre-filter with the same absolute bounds
-        # used by reject_rr_artifacts() so the buffer never contains artefacts.
-        # (333–1500 ms = 40–180 BPM, tighter than the old 300–2000 ms check.)
+        # Add RR intervals to both rolling buffers.
+        # Pre-filter with absolute bounds (333–1500 ms = 40–180 BPM).
         for rr_ms in rr_intervals:
             if 333 <= rr_ms <= 1500:
                 self.rr_intervals.append(rr_ms)
                 self.rr_buffer.append((timestamp, rr_ms))
+                self.sdnn_buffer.append((timestamp, rr_ms))
 
-        # --- FIX 1: Filter buffer for Rolling Window (Last 60 Seconds) ---
         current_time = time.time()
-        window_start = current_time - 60.0
-        
-        # Extract only beats from the last 60 seconds for calculation
-        recent_nn = [rr for t, rr in self.rr_buffer if t >= window_start]
-        recent_timestamps = [t for t, rr in self.rr_buffer if t >= window_start]
-        # -----------------------------------------------------------------
 
-        # Interpolation for RSA visualization (uses recent history)
+        # Rolling 60-second window for RMSSD
+        window_start_60 = current_time - 60.0
+        recent_nn = [rr for t, rr in self.rr_buffer if t >= window_start_60]
+        recent_timestamps = [t for t, rr in self.rr_buffer if t >= window_start_60]
+
+        # Rolling 5-minute window for SDNN (Task Force 1996 minimum)
+        window_start_300 = current_time - 300.0
+        sdnn_nn = [rr for t, rr in self.sdnn_buffer if t >= window_start_300]
+
+        # Interpolation for RSA visualization — returns BPM for display
         x_new, y_new = interpolate_hr_stream(recent_timestamps, recent_nn, current_time)
 
         # Use device-reported HR directly
         display_hr = float(hr_bpm) if hr_bpm > 0 else (y_new[-1] if len(y_new) > 0 else 0.0)
 
-        # Coherence calculation — carry forward last known value to avoid saw-teeth
-        # Use ACC-detected breath rate when available, otherwise fall back to pacer target
+        # Coherence — computed on interpolated RR (ms), not BPM.
+        # Carry forward last known value to avoid saw-teeth.
         coherence_score = self._last_coherence_score
         if current_time - self.last_coherence_calc_time > 1.0:
-            if len(y_new) > 0:
+            # interpolate_rr_stream returns RR in ms — correct input for PSD
+            _, y_rr = interpolate_rr_stream(recent_timestamps, recent_nn, current_time)
+            if len(y_rr) > 0:
                 effective_bpm = (
                     self.acc_breath_rate_bpm
                     if self.acc_breath_rate_bpm is not None
                     else self.pacer_target_bpm
                 )
                 target_freq = effective_bpm / 60.0
-                new_score = calculate_coherence_score(y_new, target_freq=target_freq)
+                new_score = calculate_coherence_score(y_rr, target_freq=target_freq)
                 if new_score > 0.0:
                     self._last_coherence_score = new_score
                     coherence_score = new_score
-                self.last_coherence_calc_time = current_time
+            self.last_coherence_calc_time = current_time
 
         # Assessment logic
         if self.assessment_active and self.current_assessment_tag:
@@ -230,14 +238,16 @@ class SignalProcessor:
                     self.assessment_data[self.current_assessment_tag] = []
                 self.assessment_data[self.current_assessment_tag].append(amplitude)
 
-        # --- FIX 2: Calculate Metrics on Rolling Window ---
+        # RMSSD: artifact-aware calculation on 60-second window.
+        # Pass the raw window array; calculate_metrics uses the artifact-aware
+        # algorithm internally (reject_rr_artifacts builds the mask).
         rmssd = 0.0
         sdnn = 0.0
         if len(recent_nn) > 1:
-            # Calculate on 'recent_nn' (60s window) instead of all 'nn_intervals'
-            rmssd, sdnn_val = calculate_metrics(np.array(recent_nn))
-            sdnn = sdnn_val
-        # --------------------------------------------------
+            rmssd, _ = calculate_metrics(np.array(recent_nn))
+        # SDNN: only meaningful over 5 minutes (Task Force 1996).
+        if len(sdnn_nn) > 1:
+            _, sdnn = calculate_metrics(np.array(sdnn_nn))
 
         output = ProcessedData(
             timestamp=timestamp,
@@ -346,29 +356,33 @@ class SignalProcessor:
     def handle_data_update(self, payload: Dict[str, Any]):
         rr_ms = payload.get('rr_ms')
         timestamp = payload.get(KEY_TIMESTAMP, time.time())
-        
-        # 1. Interpolation (RSA Visualization)
+
         current_time = time.time()
-        timestamps = [x[0] for x in self.rr_buffer]
-        nn_intervals = [x[1] for x in self.rr_buffer]
-        
-        x_new, y_new = interpolate_hr_stream(timestamps, nn_intervals, current_time)
-        
+
+        # 1. Rolling 60-second window (consistent with process_hr_batch)
+        window_start_60 = current_time - 60.0
+        recent_timestamps = [t for t, rr in self.rr_buffer if t >= window_start_60]
+        recent_nn = [rr for t, rr in self.rr_buffer if t >= window_start_60]
+
+        # Interpolation for RSA visualization (BPM for display)
+        x_new, y_new = interpolate_hr_stream(recent_timestamps, recent_nn, current_time)
+
         latest_interpolated = 0.0
         if len(y_new) > 0:
             latest_interpolated = y_new[-1]
-        
-        # 2. Coherence Calculation (Throttled) — carry forward last known value
+
+        # 2. Coherence — computed on interpolated RR (ms), carry forward last value
         coherence_score = self._last_coherence_score
-        if current_time - self.last_coherence_calc_time > 1.0: # 1Hz
-            if len(y_new) > 0:
+        if current_time - self.last_coherence_calc_time > 1.0:
+            _, y_rr = interpolate_rr_stream(recent_timestamps, recent_nn, current_time)
+            if len(y_rr) > 0:
                 target_freq = self.pacer_target_bpm / 60.0
-                new_score = calculate_coherence_score(y_new, target_freq=target_freq)
+                new_score = calculate_coherence_score(y_rr, target_freq=target_freq)
                 if new_score > 0.0:
                     self._last_coherence_score = new_score
                     coherence_score = new_score
-                self.last_coherence_calc_time = current_time
-        
+            self.last_coherence_calc_time = current_time
+
         # 3. Assessment Logic
         if self.assessment_active and self.current_assessment_tag:
             if len(y_new) > 0:
@@ -377,10 +391,10 @@ class SignalProcessor:
                     self.assessment_data[self.current_assessment_tag] = []
                 self.assessment_data[self.current_assessment_tag].append(amplitude)
 
-        # Calculate RMSSD
+        # RMSSD on 60-second rolling window
         rmssd = 0.0
-        if len(nn_intervals) > 1:
-            rmssd, _ = calculate_metrics(np.array(nn_intervals))
+        if len(recent_nn) > 1:
+            rmssd, _ = calculate_metrics(np.array(recent_nn))
 
         output_payload = ProcessedData(
             timestamp=timestamp,
