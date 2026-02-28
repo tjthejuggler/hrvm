@@ -201,6 +201,7 @@ A legacy 4-field format (`<type>,<x>,<y>,<z>`) is also accepted for backwards co
 - **`src/gui/ticwatch_charts.py`**: Chart widgets for both watches: `TicWatchLeftAccChart`, `TicWatchLeftGyroChart`, `TicWatchLeftMagChart`, `TicWatchRightAccChart`, `TicWatchRightGyroChart`, `TicWatchRightMagChart`.
 
 ## Architecture
+- **`src/ble/stream_publisher.py`**: `StreamPublisher` — binds a ZeroMQ PUB socket (`tcp://127.0.0.1:5555`) and publishes HR, ACC, and ECG batches as JSON to any subscribing program. Runs alongside the existing `multiprocessing.Pipe` to the GUI; zero changes to existing data flow. See [`docs/zmq_stream_api.md`](docs/zmq_stream_api.md) for the full subscriber API.
 - **`src/ble/`**: Bluetooth Low Energy management using `bleak`. Streams HR data via BLE HR Measurement and ACC/ECG data via Polar PMD service (`fb005c81/82`). Includes MTU negotiation, device pairing, D-Bus `StartNotify` for reliable PMD streaming, and automatic reconnection with exponential backoff on unexpected disconnects. Also manages the Polar Verity Sense via `pvs_manager.py` using SDK Mode.
 - **`src/ble/pvs_manager.py`**: `PolarVeritySenseManager` manages PVS BLE connection in a background thread. Supports two mutually exclusive modes: SDK Mode (ACC/GYR/MAG) and Normal Mode (PPI). Sends `SDK_MODE_DISABLE` before PPI start to clear stale device state. Uses the device's own `timestamp_ns` (from the PMD packet header) to compute per-sample timestamps via `_device_ts_to_wall()`, eliminating backwards-going timestamps caused by per-packet `time.time()` jitter when ACC and GYR packets arrive interleaved.
 - **`src/ble/pvs_parser.py`**: Parses raw PMD data packets for ACC, GYR, MAG, PPI. Supports both raw (0x00) and delta-compressed (0x80) frame types using bitmask `(frame_type & 0x80) == 0x80`. Provides `build_sdk_cmd()` for the proven SDK mode command format.
@@ -255,10 +256,23 @@ If the application fails to find the device or connects and immediately disconne
 - **Session Mode IPC:** The GUI sends `MSG_CMD_SET_SESSION_MODE` via the math control pipe before connecting. The signal processor stores the mode and only starts `SessionRecorder` when mode is `"chess"`. Three modes are defined in `ipc.py`: `SESSION_MODE_CHESS`, `SESSION_MODE_COUNTING`, `SESSION_MODE_NONE`.
 - **Counting Game:** When "Counting" mode is selected, `CountingGameWidget` is built at the top of the charts area. During a game round, RR intervals from `ProcessedData` are fed to the controller via `feed_rr()`. The game timer is a random duration (20–80s) chosen at round start. Actual BPM = `(RR_count / duration) × 60`; guessed BPM = `(user_count / duration) × 60`. Results are appended to `counting_game_data.json` and the scatter chart updates immediately.
 
+## ZeroMQ Sensor Stream
+
+HRVM publishes live sensor data over a ZeroMQ PUB socket so any external program can subscribe without reimplementing BLE. The Polar H10 only supports one BLE connection at a time — the ZeroMQ relay is the only way to share sensor data with multiple consumers simultaneously.
+
+- **Endpoint:** `tcp://127.0.0.1:5555`
+- **Topics:** `hr`, `acc`, `ecg`
+- **Format:** multipart `[topic_bytes, json_bytes]`
+- **Overhead:** ~0.1–0.3 ms (negligible vs. 20–100 ms BLE floor)
+
+Full API reference, payload schemas, and code examples in multiple languages: **[`docs/zmq_stream_api.md`](docs/zmq_stream_api.md)**
+
 ## License
 MIT License
 
 ## Last Updated
+2026-02-27 18:22 CET — **ZeroMQ sensor stream**. Added `src/ble/stream_publisher.py` (`StreamPublisher`) which binds a ZeroMQ PUB socket at `tcp://127.0.0.1:5555` and publishes HR, ACC, and ECG batches as JSON. Tapped into `_hr_notification_handler`, `_acc_notification_handler`, and `_ecg_notification_handler` in `src/ble/ble_manager.py` — one extra `publisher.publish_*()` call per handler alongside the existing pipe send. The publisher is started in `run()` and stopped in cleanup. Added `pyzmq>=25.0.0` to `requirements.txt`. Full subscriber API documented in `docs/zmq_stream_api.md` with examples in Python, Rust, and Node.js.
+
 2026-02-24 10:57 CET — **TicWatch hardware timestamps**. The watch app now sends a 5-field payload (`<type>,<hw_ns>,<x>,<y>,<z>`) where `hw_ns` is Android's `event.timestamp` in nanoseconds since last boot. `_parse_line` in `src/ble/ticwatch_manager.py` converts this to milliseconds and stores it in the new `hw_timestamp_ms` field of `TicWatchSample` (alongside the existing `pc_timestamp` for recording). `ticwatch_charts.py` now uses `hw_timestamp_ms` for the chart X-axis, eliminating network-jitter distortion. Legacy 4-field packets are still accepted (PC clock used as fallback).
 
 2026-02-24 10:30 CET — **Juggling Counter app**. New `src/gui/juggling_counter.py` adds a juggling catch counter to the APPS section. `HandCounter` computes the 3-sample moving-average of the ACC magnitude from a TicWatch and registers a catch whenever the smoothed value exceeds a configurable **threshold** (default 15 m/s²) with a minimum **cooldown** between catches (default 0.3 s). `JugglingWidget` exposes both settings as sliders, shows large per-hand (Left, Right) and Total catch counts, and has Start / Stop / Reset controls. Works with one or both TicWatches simultaneously — each hand is counted independently. Integrated into `UIManager`: instantiated alongside other apps, built in `apps_container`, ticked each frame, and fed ACC samples from `_poll_ticwatch()`.

@@ -12,6 +12,7 @@ from bleak.backends.device import BLEDevice
 
 from src.ble.ring_buffer import RingBuffer
 from src.ble.dbus_agent import register_agent
+from src.ble.stream_publisher import StreamPublisher
 from src.utils.ipc import HRBatch, ACCBatch, ECGBatch, BLECommand
 
 # Configure logging
@@ -194,6 +195,7 @@ class BleakManager:
         self._agent_registered = False
         self._pmd_response_event: Optional[asyncio.Event] = None
         self._pmd_response_ok = False
+        self.publisher = StreamPublisher()
 
         # Auto-reconnect state
         self._user_disconnect = False      # True when user explicitly disconnects
@@ -567,6 +569,8 @@ class BleakManager:
         except Exception as e:
             logger.error(f"Failed to send HR batch to pipe: {e}")
 
+        self.publisher.publish_hr(batch)
+
     def _pmd_control_handler(self, sender, data: bytearray) -> None:
         """Handle PMD Control Point indications (responses to commands).
 
@@ -639,6 +643,8 @@ class BleakManager:
         except Exception as e:
             logger.error(f"Failed to send ACC batch to pipe: {e}")
 
+        self.publisher.publish_acc(batch)
+
     def _ecg_notification_handler(self, sender, data: bytearray) -> None:
         """Handle incoming PMD ECG data notifications."""
         if len(data) < 10:
@@ -666,6 +672,8 @@ class BleakManager:
             self.data_pipe.send(batch)
         except Exception as e:
             logger.error(f"Failed to send ECG batch to pipe: {e}")
+
+        self.publisher.publish_ecg(batch)
 
     async def _generate_mock_data(self):
         """Generate mock HR data for testing without device."""
@@ -902,6 +910,8 @@ class BleakManager:
         logger.info(f"BLE Process started. Mock Mode: {self.mock_mode}")
         logger.info("Waiting for 'connect' command from GUI...")
 
+        self.publisher.start()
+
         while not self.should_exit:
             await self.handle_control_messages()
             await asyncio.sleep(0.1)
@@ -935,6 +945,7 @@ class BleakManager:
             except Exception:
                 pass
             await self.client.disconnect()
+        self.publisher.stop()
         logger.info("BLE Process exiting.")
 
 
